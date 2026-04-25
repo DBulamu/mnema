@@ -96,6 +96,8 @@ func RegisterAuth(api huma.API, deps AuthDeps) {
 	})
 
 	registerMagicLinkConsume(api, deps)
+	registerRefresh(api, deps)
+	registerLogout(api, deps)
 }
 
 type magicLinkConsumeInput struct {
@@ -190,6 +192,134 @@ func registerMagicLinkConsume(api huma.API, deps AuthDeps) {
 		out.Body.RefreshExpiresAt = session.ExpiresAt.Format(time.RFC3339)
 		out.Body.User.ID = user.ID
 		out.Body.User.Email = user.Email
+		return out, nil
+	})
+}
+
+type refreshInput struct {
+	Body struct {
+		RefreshToken string `json:"refresh_token" minLength:"10" doc:"Opaque refresh token returned at login"`
+	}
+}
+
+type refreshOutput struct {
+	Body struct {
+		AccessToken     string `json:"access_token"`
+		AccessExpiresAt string `json:"access_expires_at" format:"date-time"`
+	}
+}
+
+// registerRefresh wires POST /v1/auth/refresh.
+//
+// Trade-off note: this MVP does NOT rotate the refresh token on use. A
+// rotating scheme (issue new refresh on each refresh, revoke old) catches
+// stolen tokens earlier but adds bookkeeping (token reuse detection,
+// session families). We accept the simpler scheme here and revisit when
+// we have real users and a threat to defend against.
+func registerRefresh(api huma.API, deps AuthDeps) {
+	huma.Register(api, huma.Operation{
+		OperationID: "auth-refresh",
+		Method:      http.MethodPost,
+		Path:        "/v1/auth/refresh",
+		Summary:     "Exchange a refresh token for a new access token",
+		Tags:        []string{"auth"},
+	}, func(ctx context.Context, in *refreshInput) (*refreshOutput, error) {
+		token := strings.TrimSpace(in.Body.RefreshToken)
+		if token == "" {
+			return nil, huma.Error400BadRequest("refresh_token is required")
+		}
+
+		session, err := deps.Sessions.LookupByToken(ctx, auth.Token(token))
+		if err != nil {
+			if errors.Is(err, auth.ErrSessionInvalid) {
+				return nil, huma.Error401Unauthorized("refresh token invalid or expired")
+			}
+			deps.Logger.Error().Err(err).Msg("lookup session")
+			return nil, huma.Error500InternalServerError("could not refresh")
+		}
+
+		access, accessExp, err := deps.JWT.Issue(session.UserID, time.Now().UTC())
+		if err != nil {
+			deps.Logger.Error().Err(err).Str("user_id", session.UserID).Msg("issue access token")
+			return nil, huma.Error500InternalServerError("could not issue access token")
+		}
+
+		out := &refreshOutput{}
+		out.Body.AccessToken = access
+		out.Body.AccessExpiresAt = accessExp.Format(time.RFC3339)
+		return out, nil
+	})
+}
+
+type logoutInput struct {
+	Body struct {
+		// We accept the refresh token in the body so a single logout call
+		// can revoke the session without a separate "list my sessions"
+		// step. Bearer access is also required (Security below) so a
+		// stolen refresh alone cannot trigger a logout.
+		RefreshToken string `json:"refresh_token" minLength:"10"`
+	}
+}
+
+type logoutOutput struct {
+	Body struct {
+		Status string `json:"status" enum:"revoked"`
+	}
+}
+
+// registerLogout wires POST /v1/auth/logout. Idempotent: revoking an
+// already-revoked or already-expired session returns success.
+func registerLogout(api huma.API, deps AuthDeps) {
+	huma.Register(api, huma.Operation{
+		OperationID: "auth-logout",
+		Method:      http.MethodPost,
+		Path:        "/v1/auth/logout",
+		Summary:     "Revoke the current refresh token",
+		Tags:        []string{"auth"},
+		Security:    []map[string][]string{{BearerSecurityName: {}}},
+	}, func(ctx context.Context, in *logoutInput) (*logoutOutput, error) {
+		userID := UserIDFromContext(ctx)
+		if userID == "" {
+			return nil, huma.Error401Unauthorized("unauthenticated")
+		}
+
+		token := strings.TrimSpace(in.Body.RefreshToken)
+		if token == "" {
+			return nil, huma.Error400BadRequest("refresh_token is required")
+		}
+
+		session, err := deps.Sessions.LookupByToken(ctx, auth.Token(token))
+		if err != nil {
+			// Be lenient: if the token is already invalid, treat logout
+			// as a no-op success. Returning 401 here would let an
+			// attacker probe whether a token is still active.
+			if errors.Is(err, auth.ErrSessionInvalid) {
+				out := &logoutOutput{}
+				out.Body.Status = "revoked"
+				return out, nil
+			}
+			deps.Logger.Error().Err(err).Msg("lookup session for logout")
+			return nil, huma.Error500InternalServerError("could not logout")
+		}
+
+		// Bind: the access token's subject must match the session's owner.
+		// Without this check, a user with a valid access token could
+		// revoke arbitrary sessions of other users.
+		if session.UserID != userID {
+			out := &logoutOutput{}
+			out.Body.Status = "revoked"
+			return out, nil
+		}
+
+		if err := deps.Sessions.Revoke(ctx, session.ID); err != nil {
+			deps.Logger.Error().Err(err).Str("session_id", session.ID).Msg("revoke session")
+			return nil, huma.Error500InternalServerError("could not logout")
+		}
+
+		deps.Logger.Info().Str("user_id", userID).Str("session_id", session.ID).Msg("logout")
+
+		out := &logoutOutput{}
+		out.Body.Status = "revoked"
 		return out, nil
 	})
 }

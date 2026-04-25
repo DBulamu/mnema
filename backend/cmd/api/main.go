@@ -1,3 +1,9 @@
+// Command api is the Mnema HTTP API server.
+//
+// Startup order matters: config first (so we can fail fast on missing env),
+// then logger (so subsequent errors are observable), then DB pool, then
+// migrations (which need the pool), then HTTP. Anything that can fail
+// during boot must fail before we start accepting connections.
 package main
 
 import (
@@ -10,8 +16,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/DBulamu/mnema/backend/internal/auth"
 	"github.com/DBulamu/mnema/backend/internal/config"
 	"github.com/DBulamu/mnema/backend/internal/db"
+	"github.com/DBulamu/mnema/backend/internal/email"
+	"github.com/DBulamu/mnema/backend/internal/httpapi"
 	"github.com/DBulamu/mnema/backend/internal/logger"
 	"github.com/DBulamu/mnema/backend/internal/migrations"
 	"github.com/danielgtaylor/huma/v2"
@@ -49,10 +58,19 @@ func run() error {
 	}
 	log.Info().Msg("migrations applied")
 
+	magicLinks := auth.NewMagicLinkStore(pool)
+	emailSender := email.New(cfg)
+
 	mux := http.NewServeMux()
 	api := humago.New(mux, humaConfig())
 
 	registerHealth(api)
+	httpapi.RegisterAuth(api, httpapi.AuthDeps{
+		MagicLinks: magicLinks,
+		Email:      emailSender,
+		Logger:     log,
+		AppBaseURL: cfg.AppBaseURL,
+	})
 
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.HTTPPort),

@@ -1,3 +1,10 @@
+// Package config loads runtime configuration from environment variables.
+//
+// Mnema runs in three environments — local, test, prod — selected via APP_ENV.
+// Provider implementations (email sender, LLM client, S3 storage) are wired
+// based on Env so that the same binary behaves correctly in each one without
+// per-env build tags. This file is the single source of truth for what each
+// environment requires; keep validate() in sync when adding env-sensitive deps.
 package config
 
 import (
@@ -31,6 +38,7 @@ type Config struct {
 	HTTPPort int
 	LogLevel string
 
+	AppBaseURL  string
 	DatabaseURL string
 
 	JWT  JWTConfig
@@ -76,6 +84,7 @@ func Load() (Config, error) {
 		Env:         env,
 		HTTPPort:    getenvInt("HTTP_PORT", 8080),
 		LogLevel:    getenv("LOG_LEVEL", "info"),
+		AppBaseURL:  getenv("APP_BASE_URL", "http://localhost:5173"),
 		DatabaseURL: getenv("DATABASE_URL", ""),
 		JWT: JWTConfig{
 			Secret:     getenv("JWT_SECRET", ""),
@@ -108,6 +117,9 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
+// validate enforces invariants that depend on the environment.
+// Local and test get sensible defaults; prod must fail fast on missing
+// secrets so we never accidentally ship the placeholder JWT secret.
 func (c Config) validate() error {
 	if c.DatabaseURL == "" {
 		return fmt.Errorf("DATABASE_URL is required")

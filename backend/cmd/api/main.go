@@ -83,7 +83,10 @@ func run() error {
 	messagesRepo := pgmessages.New(pool)
 
 	mailer := selectMailer(cfg)
-	chatLLM := selectChatLLM(cfg)
+	chatLLM, err := selectChatLLM(cfg)
+	if err != nil {
+		return fmt.Errorf("select chat llm: %w", err)
+	}
 
 	// --- Usecases (composed from adapters). --------------------------
 	requestLink := &authuc.RequestMagicLink{
@@ -191,13 +194,21 @@ type mailer interface {
 	Send(ctx context.Context, to, subject, text string) error
 }
 
-// chatLLMBridge adapts an llm.Stub (and future real providers) to the
-// chat.LLMReplier interface the usecase expects. It exists because the
-// usecase declares Turn as its own type per the consumer-side-interface
-// rule, so the adapter cannot be passed directly even though the field
-// shape is identical.
+// llmReplier is what every llm-package adapter (Stub, OpenAI, future
+// Anthropic) already satisfies structurally. Declared here so the
+// bridge below is agnostic to the concrete provider — the only place
+// in the binary that picks which one is selectChatLLM.
+type llmReplier interface {
+	Reply(ctx context.Context, history []llmadapter.Turn) (string, error)
+}
+
+// chatLLMBridge adapts any llm-package adapter to the chat.LLMReplier
+// interface the usecase expects. It exists because the usecase
+// declares Turn as its own type per the consumer-side-interface rule,
+// so the adapter cannot be passed directly even though the field shape
+// is identical.
 type chatLLMBridge struct {
-	stub *llmadapter.Stub
+	provider llmReplier
 }
 
 func (b chatLLMBridge) Reply(ctx context.Context, history []chatuc.Turn) (string, error) {
@@ -205,15 +216,37 @@ func (b chatLLMBridge) Reply(ctx context.Context, history []chatuc.Turn) (string
 	for i, t := range history {
 		turns[i] = llmadapter.Turn{Role: t.Role, Content: t.Content}
 	}
-	return b.stub.Reply(ctx, turns)
+	return b.provider.Reply(ctx, turns)
 }
 
-// selectChatLLM picks the LLM adapter based on environment. MVP wires
-// the deterministic stub everywhere; a real provider will land behind
-// a config flag once API keys and prompts are settled.
-func selectChatLLM(_ config.Config) chatuc.LLMReplier {
-	return chatLLMBridge{stub: llmadapter.NewStub()}
+// selectChatLLM picks the LLM adapter based on config.LLM.Provider.
+// "stub" is always available and deterministic — useful in local and
+// test. "openai" requires OPENAI_API_KEY and hits the real API; we
+// fail at startup if the key is missing, so a misconfigured deploy
+// never silently falls back to the stub.
+func selectChatLLM(cfg config.Config) (chatuc.LLMReplier, error) {
+	switch cfg.LLM.Provider {
+	case "", "stub":
+		return chatLLMBridge{provider: llmadapter.NewStub()}, nil
+	case "openai":
+		client, err := llmadapter.NewOpenAI(
+			cfg.LLM.OpenAIAPIKey,
+			cfg.LLM.ExtractionModel,
+			llmadapter.WithOpenAISystemPrompt(chatSystemPrompt),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("llm openai: %w", err)
+		}
+		return chatLLMBridge{provider: client}, nil
+	default:
+		return nil, fmt.Errorf("unknown llm provider %q", cfg.LLM.Provider)
+	}
 }
+
+// chatSystemPrompt sets the assistant's voice for the conversation
+// usecase. Kept in the binary (not in the YAML) because it ships with
+// the code — promptsmithing happens in PRs, not in environment.
+const chatSystemPrompt = `Ты — внимательный собеседник в приложении Mnema, помогающем человеку сохранять мысли, идеи и воспоминания. Отвечай по-русски, кратко (1–3 предложения). Никаких списков, заголовков или эмодзи. Если человек поделился воспоминанием или идеей — мягко подтверди, при необходимости задай один уточняющий вопрос. Не давай советов, если их не просили.`
 
 // selectMailer picks the email adapter based on environment. Test wires
 // a captor (in-memory). Local and prod both use SMTP — the difference

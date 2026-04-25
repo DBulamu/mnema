@@ -26,6 +26,12 @@ var (
 	// has been soft-deleted.
 	ErrUserNotFound = errors.New("user not found")
 
+	// ErrConversationNotFound is returned when a conversation lookup
+	// misses, or when the conversation exists but belongs to a different
+	// user. We collapse "missing" and "not yours" into one error so the
+	// API doesn't leak the existence of other users' threads.
+	ErrConversationNotFound = errors.New("conversation not found")
+
 	// ErrInvalidArgument is for caller-side validation failures (empty
 	// email, malformed input). Transport maps it to 400.
 	ErrInvalidArgument = errors.New("invalid argument")

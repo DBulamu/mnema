@@ -23,7 +23,10 @@ import (
 
 	emailadapter "github.com/DBulamu/mnema/backend/internal/adapter/email"
 	jwtadapter "github.com/DBulamu/mnema/backend/internal/adapter/jwt"
+	llmadapter "github.com/DBulamu/mnema/backend/internal/adapter/llm"
+	pgconversations "github.com/DBulamu/mnema/backend/internal/adapter/postgres/conversations"
 	pgmagiclinks "github.com/DBulamu/mnema/backend/internal/adapter/postgres/magiclinks"
+	pgmessages "github.com/DBulamu/mnema/backend/internal/adapter/postgres/messages"
 	pgsessions "github.com/DBulamu/mnema/backend/internal/adapter/postgres/sessions"
 	pgusers "github.com/DBulamu/mnema/backend/internal/adapter/postgres/users"
 	"github.com/DBulamu/mnema/backend/internal/adapter/system"
@@ -33,6 +36,7 @@ import (
 	"github.com/DBulamu/mnema/backend/internal/migrations"
 	"github.com/DBulamu/mnema/backend/internal/transport/rest"
 	authuc "github.com/DBulamu/mnema/backend/internal/usecase/auth"
+	chatuc "github.com/DBulamu/mnema/backend/internal/usecase/chat"
 	profileuc "github.com/DBulamu/mnema/backend/internal/usecase/profile"
 )
 
@@ -75,8 +79,11 @@ func run() error {
 	usersRepo := pgusers.New(pool)
 	sessionsRepo := pgsessions.New(pool)
 	magicLinksRepo := pgmagiclinks.New(pool)
+	conversationsRepo := pgconversations.New(pool)
+	messagesRepo := pgmessages.New(pool)
 
 	mailer := selectMailer(cfg)
+	chatLLM := selectChatLLM(cfg)
 
 	// --- Usecases (composed from adapters). --------------------------
 	requestLink := &authuc.RequestMagicLink{
@@ -106,6 +113,21 @@ func run() error {
 	}
 	getMe := &profileuc.GetMe{Users: usersRepo}
 
+	startConversation := &chatuc.StartConversation{Conversations: conversationsRepo}
+	listConversations := &chatuc.ListConversations{Conversations: conversationsRepo}
+	getConversation := &chatuc.GetConversation{
+		Conversations: conversationsRepo,
+		Messages:      messagesRepo,
+	}
+	sendMessage := &chatuc.SendMessage{
+		Conversations: conversationsRepo,
+		Messages:      messagesRepo,
+		History:       messagesRepo,
+		Toucher:       conversationsRepo,
+		LLM:           chatLLM,
+		Clock:         clock,
+	}
+
 	// --- Transport (handlers + middleware). --------------------------
 	api, mux := rest.NewAPI(
 		"Mnema API",
@@ -126,6 +148,10 @@ func run() error {
 	rest.RegisterRefresh(api, refresh)
 	rest.RegisterLogout(api, logout)
 	rest.RegisterMe(api, getMe)
+	rest.RegisterStartConversation(api, startConversation)
+	rest.RegisterListConversations(api, listConversations)
+	rest.RegisterGetConversation(api, getConversation)
+	rest.RegisterSendMessage(api, sendMessage)
 
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.HTTPPort),
@@ -163,6 +189,30 @@ func run() error {
 // rest of the binary doesn't see provider-specific types.
 type mailer interface {
 	Send(ctx context.Context, to, subject, text string) error
+}
+
+// chatLLMBridge adapts an llm.Stub (and future real providers) to the
+// chat.LLMReplier interface the usecase expects. It exists because the
+// usecase declares Turn as its own type per the consumer-side-interface
+// rule, so the adapter cannot be passed directly even though the field
+// shape is identical.
+type chatLLMBridge struct {
+	stub *llmadapter.Stub
+}
+
+func (b chatLLMBridge) Reply(ctx context.Context, history []chatuc.Turn) (string, error) {
+	turns := make([]llmadapter.Turn, len(history))
+	for i, t := range history {
+		turns[i] = llmadapter.Turn{Role: t.Role, Content: t.Content}
+	}
+	return b.stub.Reply(ctx, turns)
+}
+
+// selectChatLLM picks the LLM adapter based on environment. MVP wires
+// the deterministic stub everywhere; a real provider will land behind
+// a config flag once API keys and prompts are settled.
+func selectChatLLM(_ config.Config) chatuc.LLMReplier {
+	return chatLLMBridge{stub: llmadapter.NewStub()}
 }
 
 // selectMailer picks the email adapter based on environment. Test wires

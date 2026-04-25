@@ -6,10 +6,16 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 )
 
-// ctxKey is a private type for context keys to prevent collisions.
+// ctxKey is a private type for context keys to prevent collisions with
+// other packages that might use bare strings or ints as keys.
 type ctxKey int
 
-const ctxKeyUserID ctxKey = iota
+// Context keys live in a single iota block so values stay unique. Add
+// new keys here only — never re-declare ctxKey constants elsewhere.
+const (
+	ctxKeyUserID ctxKey = iota
+	ctxKeyRequestID
+)
 
 // UserIDFromContext returns the authenticated user ID set by the JWT
 // middleware. Empty string means "request was unauthenticated".

@@ -112,6 +112,12 @@ func run() error {
 		"0.1.0",
 		"Backend API for Mnema — a digital brain for thoughts, ideas, and memories.",
 	)
+	// Middleware order: request_id first (so every downstream layer can
+	// attach it to logs/errors), then logging (wraps the rest of the
+	// chain to capture status + latency), then JWT (sets user_id which
+	// the logging middleware reads after next()).
+	api.UseMiddleware(rest.RequestIDMiddleware())
+	api.UseMiddleware(rest.LoggingMiddleware(log))
 	api.UseMiddleware(rest.JWTMiddleware(api, jwtIssuer))
 
 	rest.RegisterHealth(api)

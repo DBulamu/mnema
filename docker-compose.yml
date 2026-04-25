@@ -1,0 +1,64 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: mnema-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mnema}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mnema}
+      POSTGRES_DB: ${POSTGRES_DB:-mnema}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - mnema-postgres-data:/var/lib/postgresql/data
+      - ./migrations/000_extensions.sql:/docker-entrypoint-initdb.d/000_extensions.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mnema} -d ${POSTGRES_DB:-mnema}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    container_name: mnema-minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-mnema}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-mnemamnema}
+    command: server /data --console-address ":9001"
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - mnema-minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio-bootstrap:
+    image: minio/mc:latest
+    container_name: mnema-minio-bootstrap
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-mnema} ${MINIO_ROOT_PASSWORD:-mnemamnema} &&
+      mc mb --ignore-existing local/${MINIO_BUCKET:-mnema-media} &&
+      mc anonymous set download local/${MINIO_BUCKET:-mnema-media} || true
+      "
+
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: mnema-mailpit
+    ports:
+      - "${MAILPIT_SMTP_PORT:-1025}:1025"
+      - "${MAILPIT_WEB_PORT:-8025}:8025"
+    environment:
+      MP_MAX_MESSAGES: 5000
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+
+volumes:
+  mnema-postgres-data:
+  mnema-minio-data:

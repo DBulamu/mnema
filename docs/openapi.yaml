@@ -1,0 +1,910 @@
+openapi: 3.0.3
+info:
+  title: Memory Graph API
+  version: 0.1.0
+  description: |
+    Backend API для приложения "цифровой мозг" — граф мыслей, идей, воспоминаний.
+    MVP: web online-only, magic-link auth, OpenAI extraction.
+
+    См. ../seed.md, ../hypotheses.md, ../glossary.md для продуктового контекста.
+
+servers:
+  - url: https://api.memorygraph.app/v1
+    description: Production
+  - url: http://localhost:8080/v1
+    description: Local development
+
+tags:
+  - name: auth
+    description: Magic-link аутентификация
+  - name: profile
+    description: Профиль пользователя
+  - name: chat
+    description: Conversation API (capture + extraction + AI ответы)
+  - name: graph
+    description: Просмотр графа (узлы и связи)
+  - name: nodes
+    description: Прямой CRUD над узлами (для UI редактирования)
+  - name: media
+    description: Загрузка фото и аудио
+  - name: resurfacing
+    description: Proactive memory surfacing
+
+# ============================================================================
+# SECURITY
+# ============================================================================
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+# ============================================================================
+# SCHEMAS
+# ============================================================================
+
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: INVALID_REQUEST
+        message:
+          type: string
+          example: "Email is required"
+        details:
+          type: object
+
+    NodeType:
+      type: string
+      enum:
+        - thought
+        - idea
+        - memory
+        - dream
+        - emotion
+        - task
+        - event
+        - person
+        - place
+        - topic
+
+    EdgeType:
+      type: string
+      enum:
+        - part_of
+        - mentions
+        - related_to
+        - triggered_by
+        - evolved_into
+        - about
+
+    User:
+      type: object
+      required: [id, email, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        display_name:
+          type: string
+          nullable: true
+        avatar_url:
+          type: string
+          format: uri
+          nullable: true
+        timezone:
+          type: string
+          example: Europe/Moscow
+        daily_push_time:
+          type: string
+          format: time
+          nullable: true
+          example: "21:00"
+        daily_push_enabled:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    Node:
+      type: object
+      required: [id, type, activation, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        type:
+          $ref: '#/components/schemas/NodeType'
+        title:
+          type: string
+          nullable: true
+        content:
+          type: string
+          nullable: true
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Type-specific поля (см. db-schema.md)
+        occurred_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Когда произошло (для memory, event). Может быть null для мечт/целей/принципов.
+        occurred_at_precision:
+          type: string
+          enum: [day, month, year]
+          nullable: true
+        activation:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: Вес узла (0=затух, 1=активен). См. H11, H18.
+        pinned:
+          type: boolean
+        media:
+          type: array
+          items:
+            $ref: '#/components/schemas/Media'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    Edge:
+      type: object
+      required: [id, source_id, target_id, type, weight]
+      properties:
+        id:
+          type: string
+          format: uuid
+        source_id:
+          type: string
+          format: uuid
+        target_id:
+          type: string
+          format: uuid
+        type:
+          $ref: '#/components/schemas/EdgeType'
+        weight:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+        created_at:
+          type: string
+          format: date-time
+
+    Media:
+      type: object
+      required: [id, type, url]
+      properties:
+        id:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum: [image, audio, video]
+        url:
+          type: string
+          format: uri
+          description: Presigned URL (живёт 1 час)
+        thumbnail_url:
+          type: string
+          format: uri
+          nullable: true
+        mime_type:
+          type: string
+        size_bytes:
+          type: integer
+          format: int64
+        metadata:
+          type: object
+
+    Conversation:
+      type: object
+      required: [id, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+          nullable: true
+        last_message_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    Message:
+      type: object
+      required: [id, role, content, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        role:
+          type: string
+          enum: [user, assistant, system]
+        content:
+          type: string
+        audio_url:
+          type: string
+          format: uri
+          nullable: true
+        is_clarifying_question:
+          type: boolean
+        extracted_node_ids:
+          type: array
+          description: Какие узлы создались/обновились из этого сообщения
+          items:
+            type: string
+            format: uuid
+        created_at:
+          type: string
+          format: date-time
+
+    ResurfacingItem:
+      type: object
+      required: [id, kind, node, shown_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        kind:
+          type: string
+          enum: [anniversary, open_loop, pattern, mood, random]
+        node:
+          $ref: '#/components/schemas/Node'
+        message:
+          type: string
+          description: Текст для показа пользователю
+          example: "Полгода назад ты записал мысль про Тайланд. Что с этим?"
+        shown_at:
+          type: string
+          format: date-time
+
+# ============================================================================
+# RESPONSES
+# ============================================================================
+
+  responses:
+    Unauthorized:
+      description: Не авторизован
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    BadRequest:
+      description: Невалидный запрос
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Ресурс не найден
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+# ============================================================================
+# PATHS
+# ============================================================================
+
+security:
+  - BearerAuth: []
+
+paths:
+
+  # ---------- AUTH ----------
+
+  /auth/magic-link/request:
+    post:
+      tags: [auth]
+      summary: Запросить magic link на email
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email:
+                  type: string
+                  format: email
+      responses:
+        '202':
+          description: Письмо отправлено (всегда 202 чтобы не утекать существование email)
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /auth/magic-link/verify:
+    post:
+      tags: [auth]
+      summary: Проверить токен из письма и получить сессию
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token:
+                  type: string
+      responses:
+        '200':
+          description: Успешный логин
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [access_token, refresh_token, user]
+                properties:
+                  access_token:
+                    type: string
+                    description: JWT, живёт 15 минут
+                  refresh_token:
+                    type: string
+                    description: opaque, живёт 30 дней
+                  user:
+                    $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /auth/refresh:
+    post:
+      tags: [auth]
+      summary: Обновить access token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token:
+                  type: string
+      responses:
+        '200':
+          description: Новый access token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token:
+                    type: string
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: Завершить сессию (отозвать refresh token)
+      responses:
+        '204':
+          description: OK
+
+  # ---------- PROFILE ----------
+
+  /me:
+    get:
+      tags: [profile]
+      summary: Получить свой профиль
+      responses:
+        '200':
+          description: Профиль
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    patch:
+      tags: [profile]
+      summary: Обновить профиль
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                display_name:
+                  type: string
+                avatar_url:
+                  type: string
+                  format: uri
+                timezone:
+                  type: string
+                daily_push_time:
+                  type: string
+                  format: time
+                daily_push_enabled:
+                  type: boolean
+      responses:
+        '200':
+          description: Обновлённый профиль
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+
+  /me/avatar:
+    post:
+      tags: [profile]
+      summary: Загрузить аватар
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '200':
+          description: Профиль с обновлённым avatar_url
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+
+  # ---------- CHAT ----------
+
+  /conversations:
+    get:
+      tags: [chat]
+      summary: Список тредов пользователя
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+        - in: query
+          name: cursor
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Список тредов
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Conversation'
+                  next_cursor:
+                    type: string
+                    nullable: true
+
+    post:
+      tags: [chat]
+      summary: Создать новый тред
+      responses:
+        '201':
+          description: Новый тред
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Conversation'
+
+  /conversations/{conversation_id}:
+    parameters:
+      - in: path
+        name: conversation_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [chat]
+      summary: Получить тред с сообщениями
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 50
+      responses:
+        '200':
+          description: Тред с сообщениями
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  conversation:
+                    $ref: '#/components/schemas/Conversation'
+                  messages:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Message'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /conversations/{conversation_id}/messages:
+    parameters:
+      - in: path
+        name: conversation_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      tags: [chat]
+      summary: |
+        Отправить сообщение в тред.
+        Сервер: (1) сохраняет реплику, (2) вызывает LLM extraction → создаёт/обновляет узлы и связи,
+        (3) опционально задаёт уточняющий вопрос (см. H13), (4) возвращает обновлённое состояние.
+
+        Поддерживает текст и аудио (multipart/form-data для аудио).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content:
+                  type: string
+                  description: Текст сообщения
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                content:
+                  type: string
+                  description: Текст (опц., если есть audio — может быть пустым)
+                audio:
+                  type: string
+                  format: binary
+                  description: Аудиофайл для транскрипции через Whisper
+      responses:
+        '200':
+          description: Ответ AI и обновлённые узлы
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user_message, assistant_message, extracted_nodes]
+                properties:
+                  user_message:
+                    $ref: '#/components/schemas/Message'
+                  assistant_message:
+                    $ref: '#/components/schemas/Message'
+                    nullable: true
+                    description: Уточняющий вопрос или подтверждение, может быть null
+                  extracted_nodes:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Node'
+                  extracted_edges:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Edge'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  # ---------- GRAPH ----------
+
+  /graph:
+    get:
+      tags: [graph]
+      summary: Получить граф для визуализации (timeline-граф H16)
+      parameters:
+        - in: query
+          name: from
+          schema:
+            type: string
+            format: date-time
+          description: Начало временного окна
+        - in: query
+          name: to
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: types
+          schema:
+            type: array
+            items:
+              $ref: '#/components/schemas/NodeType'
+          description: Фильтр по типам узлов
+        - in: query
+          name: min_activation
+          schema:
+            type: number
+            format: float
+            default: 0
+          description: Минимальный activation (0=включая затухшие, 0.2=только активные)
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 500
+            maximum: 5000
+      responses:
+        '200':
+          description: Узлы и связи
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nodes:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Node'
+                  edges:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Edge'
+                  has_more:
+                    type: boolean
+
+  /graph/search:
+    get:
+      tags: [graph]
+      summary: |
+        Поиск узлов по тексту и/или семантике.
+        Используется для revival ("вспомни про X") — вытягивает узлы из архива.
+      parameters:
+        - in: query
+          name: q
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: include_archived
+          schema:
+            type: boolean
+            default: true
+          description: Искать также среди затухших узлов
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: Найденные узлы
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        node:
+                          $ref: '#/components/schemas/Node'
+                        score:
+                          type: number
+                          format: float
+
+  # ---------- NODES (CRUD для UI) ----------
+
+  /nodes/{node_id}:
+    parameters:
+      - in: path
+        name: node_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [nodes]
+      summary: Получить узел с его связями
+      responses:
+        '200':
+          description: Узел
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  node:
+                    $ref: '#/components/schemas/Node'
+                  edges:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Edge'
+
+    patch:
+      tags: [nodes]
+      summary: Редактировать узел (текст, тип, дата)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                content:
+                  type: string
+                type:
+                  $ref: '#/components/schemas/NodeType'
+                occurred_at:
+                  type: string
+                  format: date-time
+                  nullable: true
+                pinned:
+                  type: boolean
+      responses:
+        '200':
+          description: Обновлённый узел
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Node'
+
+    delete:
+      tags: [nodes]
+      summary: Удалить узел (soft-delete; для биографии остаётся)
+      responses:
+        '204':
+          description: OK
+
+  /nodes/{node_id}/revive:
+    parameters:
+      - in: path
+        name: node_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      tags: [nodes]
+      summary: Воскресить затухший узел (поднять activation до 1.0). См. H11.
+      responses:
+        '200':
+          description: Узел с обновлённым activation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Node'
+
+  # ---------- MEDIA ----------
+
+  /media/upload:
+    post:
+      tags: [media]
+      summary: Загрузить файл (фото/аудио)
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                node_id:
+                  type: string
+                  format: uuid
+                  description: Привязать к узлу (опц.)
+      responses:
+        '201':
+          description: Загруженный media
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Media'
+
+  /media/{media_id}:
+    parameters:
+      - in: path
+        name: media_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [media]
+      summary: Получить metadata + presigned URL
+      responses:
+        '200':
+          description: Media
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Media'
+
+    delete:
+      tags: [media]
+      summary: Удалить media
+      responses:
+        '204':
+          description: OK
+
+  # ---------- RESURFACING ----------
+
+  /resurfacing/feed:
+    get:
+      tags: [resurfacing]
+      summary: |
+        Получить персонализированный feed proactive напоминаний.
+        Сервер выбирает узлы по триггерам H8: годовщины, открытые петли, паттерны.
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 5
+            maximum: 20
+      responses:
+        '200':
+          description: Список напоминаний
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ResurfacingItem'
+
+  /resurfacing/{event_id}/engage:
+    parameters:
+      - in: path
+        name: event_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      tags: [resurfacing]
+      summary: Отметить что пользователь взаимодействовал с напоминанием
+      responses:
+        '204':
+          description: OK
+
+  /resurfacing/{event_id}/dismiss:
+    parameters:
+      - in: path
+        name: event_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      tags: [resurfacing]
+      summary: Отклонить напоминание (не показывать снова)
+      responses:
+        '204':
+          description: OK

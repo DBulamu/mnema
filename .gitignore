@@ -1,0 +1,41 @@
+# Env / secrets
+.env
+.env.prod
+.env.*.local
+*.pem
+*.key
+
+# Go
+backend/bin/
+backend/dist/
+backend/tmp/
+*.exe
+*.test
+*.out
+coverage.txt
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/coverage/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Local docker volumes
+data/
+.docker/
+
+# Logs
+*.log
+logs/

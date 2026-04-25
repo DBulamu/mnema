@@ -1,9 +1,14 @@
 // Command api is the Mnema HTTP API server.
 //
-// Startup order matters: config first (so we can fail fast on missing env),
-// then logger (so subsequent errors are observable), then DB pool, then
-// migrations (which need the pool), then HTTP. Anything that can fail
-// during boot must fail before we start accepting connections.
+// This is the composition root: it wires concrete adapters (postgres,
+// jwt, smtp, system clock) into usecases, and usecases into transport
+// handlers. Layers below depend only on the interfaces declared in the
+// usecase packages — never on each other directly.
+//
+// Startup order matters: config first (so we can fail fast on missing
+// env), then logger, then DB pool, then migrations (which need the
+// pool), then HTTP. Anything that can fail during boot must fail before
+// we accept connections.
 package main
 
 import (
@@ -16,17 +21,19 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/DBulamu/mnema/backend/internal/auth"
+	emailadapter "github.com/DBulamu/mnema/backend/internal/adapter/email"
+	jwtadapter "github.com/DBulamu/mnema/backend/internal/adapter/jwt"
+	pgmagiclinks "github.com/DBulamu/mnema/backend/internal/adapter/postgres/magiclinks"
+	pgsessions "github.com/DBulamu/mnema/backend/internal/adapter/postgres/sessions"
+	pgusers "github.com/DBulamu/mnema/backend/internal/adapter/postgres/users"
+	"github.com/DBulamu/mnema/backend/internal/adapter/system"
 	"github.com/DBulamu/mnema/backend/internal/config"
 	"github.com/DBulamu/mnema/backend/internal/db"
-	"github.com/DBulamu/mnema/backend/internal/email"
-	"github.com/DBulamu/mnema/backend/internal/httpapi"
-	"github.com/DBulamu/mnema/backend/internal/jwtauth"
 	"github.com/DBulamu/mnema/backend/internal/logger"
 	"github.com/DBulamu/mnema/backend/internal/migrations"
-	"github.com/DBulamu/mnema/backend/internal/users"
-	"github.com/danielgtaylor/huma/v2"
-	"github.com/danielgtaylor/huma/v2/adapters/humago"
+	"github.com/DBulamu/mnema/backend/internal/transport/rest"
+	authuc "github.com/DBulamu/mnema/backend/internal/usecase/auth"
+	profileuc "github.com/DBulamu/mnema/backend/internal/usecase/profile"
 )
 
 func main() {
@@ -60,36 +67,66 @@ func run() error {
 	}
 	log.Info().Msg("migrations applied")
 
-	magicLinks := auth.NewMagicLinkStore(pool)
-	sessions := auth.NewSessionStore(pool)
-	usersStore := users.NewStore(pool)
-	jwtIssuer := jwtauth.NewIssuer(cfg.JWT.Secret, cfg.JWT.AccessTTL)
-	emailSender := email.New(cfg)
+	// --- Adapters (the only place that knows about concrete tech). ---
+	clock := system.Clock{}
+	tokens := system.TokenGenerator{}
+	jwtIssuer := jwtadapter.NewIssuer(cfg.JWT.Secret, cfg.JWT.AccessTTL)
 
-	mux := http.NewServeMux()
-	api := humago.New(mux, humaConfig())
-	api.UseMiddleware(httpapi.JWTMiddleware(api, jwtIssuer))
+	usersRepo := pgusers.New(pool)
+	sessionsRepo := pgsessions.New(pool)
+	magicLinksRepo := pgmagiclinks.New(pool)
 
-	registerHealth(api)
-	httpapi.RegisterAuth(api, httpapi.AuthDeps{
-		MagicLinks: magicLinks,
-		Sessions:   sessions,
-		Users:      usersStore,
-		JWT:        jwtIssuer,
-		Email:      emailSender,
-		Logger:     log,
-		AppBaseURL: cfg.AppBaseURL,
+	mailer := selectMailer(cfg)
+
+	// --- Usecases (composed from adapters). --------------------------
+	requestLink := &authuc.RequestMagicLink{
+		Links:   magicLinksRepo,
+		Tokens:  tokens,
+		Mailer:  mailer,
+		Clock:   clock,
+		BaseURL: cfg.AppBaseURL,
+	}
+	consumeLink := &authuc.ConsumeMagicLink{
+		Links:      magicLinksRepo,
+		Users:      usersRepo,
+		Sessions:   sessionsRepo,
+		Tokens:     tokens,
+		Issuer:     jwtIssuer,
+		Clock:      clock,
 		RefreshTTL: cfg.JWT.RefreshTTL,
-	})
-	httpapi.RegisterMe(api, httpapi.MeDeps{
-		Users:  usersStore,
-		Logger: log,
-	})
+	}
+	refresh := &authuc.RefreshAccess{
+		Sessions: sessionsRepo,
+		Issuer:   jwtIssuer,
+		Clock:    clock,
+	}
+	logout := &authuc.Logout{
+		Sessions: sessionsRepo,
+		Clock:    clock,
+	}
+	getMe := &profileuc.GetMe{Users: usersRepo}
+
+	// --- Transport (handlers + middleware). --------------------------
+	api, mux := rest.NewAPI(
+		"Mnema API",
+		"0.1.0",
+		"Backend API for Mnema — a digital brain for thoughts, ideas, and memories.",
+	)
+	api.UseMiddleware(rest.JWTMiddleware(api, jwtIssuer))
+
+	rest.RegisterHealth(api)
+	rest.RegisterRequestMagicLink(api, requestLink)
+	rest.RegisterConsumeMagicLink(api, consumeLink)
+	rest.RegisterRefresh(api, refresh)
+	rest.RegisterLogout(api, logout)
+	rest.RegisterMe(api, getMe)
 
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.HTTPPort),
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	errCh := make(chan error, 1)
@@ -116,43 +153,18 @@ func run() error {
 	return nil
 }
 
-func humaConfig() huma.Config {
-	c := huma.DefaultConfig("Mnema API", "0.1.0")
-	c.Info.Description = "Backend API for Mnema — a digital brain for thoughts, ideas, and memories."
-	// Declare the bearer scheme so the generated OpenAPI lists it and
-	// Swagger UI shows the "Authorize" button. The middleware enforces it.
-	if c.Components == nil {
-		c.Components = &huma.Components{}
-	}
-	if c.Components.SecuritySchemes == nil {
-		c.Components.SecuritySchemes = map[string]*huma.SecurityScheme{}
-	}
-	c.Components.SecuritySchemes[httpapi.BearerSecurityName] = &huma.SecurityScheme{
-		Type:         "http",
-		Scheme:       "bearer",
-		BearerFormat: "JWT",
-	}
-	return c
+// mailer abstracts which email adapter to wire — kept private so the
+// rest of the binary doesn't see provider-specific types.
+type mailer interface {
+	Send(ctx context.Context, to, subject, text string) error
 }
 
-type healthOutput struct {
-	Body struct {
-		Status string `json:"status" example:"ok"`
-		Time   string `json:"time"   example:"2026-04-25T20:00:00Z"`
+// selectMailer picks the email adapter based on environment. Test wires
+// a captor (in-memory). Local and prod both use SMTP — the difference
+// is just the host: mailpit locally, Resend in prod.
+func selectMailer(cfg config.Config) mailer {
+	if cfg.Env == config.EnvTest {
+		return emailadapter.NewCaptor()
 	}
-}
-
-func registerHealth(api huma.API) {
-	huma.Register(api, huma.Operation{
-		OperationID: "healthz",
-		Method:      http.MethodGet,
-		Path:        "/healthz",
-		Summary:     "Liveness probe",
-		Tags:        []string{"system"},
-	}, func(ctx context.Context, _ *struct{}) (*healthOutput, error) {
-		out := &healthOutput{}
-		out.Body.Status = "ok"
-		out.Body.Time = time.Now().UTC().Format(time.RFC3339)
-		return out, nil
-	})
+	return emailadapter.NewSMTPSender(cfg.SMTP.Host, cfg.SMTP.Port, cfg.SMTP.From)
 }

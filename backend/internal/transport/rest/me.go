@@ -1,18 +1,16 @@
-package httpapi
+package rest
 
 import (
 	"context"
 	"net/http"
 	"time"
 
-	"github.com/DBulamu/mnema/backend/internal/users"
+	"github.com/DBulamu/mnema/backend/internal/domain"
 	"github.com/danielgtaylor/huma/v2"
-	"github.com/rs/zerolog"
 )
 
-type MeDeps struct {
-	Users  *users.Store
-	Logger zerolog.Logger
+type meRunner interface {
+	Run(ctx context.Context, userID string) (domain.User, error)
 }
 
 type meOutput struct {
@@ -28,10 +26,8 @@ type meOutput struct {
 	}
 }
 
-// RegisterMe wires GET /v1/me. The endpoint declares BearerAuth in its
-// Security block so JWTMiddleware enforces a valid token before the
-// handler runs; the handler itself can trust UserIDFromContext.
-func RegisterMe(api huma.API, deps MeDeps) {
+// RegisterMe wires GET /v1/me. Requires Bearer access.
+func RegisterMe(api huma.API, run meRunner) {
 	huma.Register(api, huma.Operation{
 		OperationID: "me-get",
 		Method:      http.MethodGet,
@@ -42,15 +38,12 @@ func RegisterMe(api huma.API, deps MeDeps) {
 	}, func(ctx context.Context, _ *struct{}) (*meOutput, error) {
 		userID := UserIDFromContext(ctx)
 		if userID == "" {
-			// Defensive: middleware should have rejected this, but if it
-			// somehow let an unauth request reach here we fail closed.
-			return nil, huma.Error401Unauthorized("unauthenticated")
+			return nil, toHTTP(errUnauthenticated)
 		}
 
-		u, err := deps.Users.GetByID(ctx, userID)
+		u, err := run.Run(ctx, userID)
 		if err != nil {
-			deps.Logger.Error().Err(err).Str("user_id", userID).Msg("get user")
-			return nil, huma.Error404NotFound("user not found")
+			return nil, toHTTP(err)
 		}
 
 		out := &meOutput{}

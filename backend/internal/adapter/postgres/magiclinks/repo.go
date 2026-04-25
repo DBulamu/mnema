@@ -1,0 +1,12 @@
+// Package magiclinks implements usecase.MagicLinkRepo backed by Postgres.
+package magiclinks
+
+import "github.com/jackc/pgx/v5/pgxpool"
+
+type Repo struct {
+	pool *pgxpool.Pool
+}
+
+func New(pool *pgxpool.Pool) *Repo {
+	return &Repo{pool: pool}
+}

@@ -1,0 +1,53 @@
+# Mnema config — local development.
+#
+# Loaded by config.Load() when APP_ENV=local. Embedded into the binary
+# at build time via //go:embed; never read from disk at runtime.
+#
+# Values like ${ENV_VAR} are expanded from process environment after
+# YAML parsing — secrets stay out of the repo while the structure stays
+# under version control.
+
+env: local
+
+http:
+  port: 8080
+
+log:
+  level: debug
+
+app:
+  base_url: http://localhost:5173
+
+# Postgres in docker-compose; full URL kept here so that swapping ports
+# or db names is a one-file change.
+database:
+  url: postgres://mnema:mnema@localhost:5432/mnema?sslmode=disable
+
+jwt:
+  # Local-only placeholder; prod must override via env.
+  secret: change-me-locally
+  access_ttl: 15m
+  refresh_ttl: 720h
+
+# Mailpit captures all SMTP locally on :1025.
+smtp:
+  host: localhost
+  port: 1025
+  from: noreply@mnema.local
+
+# MinIO with default dev credentials from docker-compose.
+s3:
+  endpoint: http://localhost:9000
+  access_key: mnema
+  secret_key: mnemamnema
+  bucket: mnema-media
+  use_path_style: true
+
+# Stub LLM is deterministic — no API key needed locally. Switch
+# provider to "openai" and set OPENAI_API_KEY to test against the real
+# model.
+llm:
+  provider: stub
+  openai_api_key: ${OPENAI_API_KEY}
+  extraction_model: gpt-4o-mini
+  embedding_model: text-embedding-3-small

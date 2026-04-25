@@ -1,19 +1,34 @@
-// Package config loads runtime configuration from environment variables.
+// Package config loads runtime configuration from per-environment YAML
+// files embedded into the binary.
 //
-// Mnema runs in three environments — local, test, prod — selected via APP_ENV.
-// Provider implementations (email sender, LLM client, S3 storage) are wired
-// based on Env so that the same binary behaves correctly in each one without
-// per-env build tags. This file is the single source of truth for what each
-// environment requires; keep validate() in sync when adding env-sensitive deps.
+// Mnema runs in three environments — local, test, prod — selected via
+// APP_ENV. The matching config/<env>.yaml file is parsed; any value of
+// the form ${ENV_VAR} is then expanded from the process environment so
+// secrets stay out of the repo.
+//
+// Provider implementations (email sender, LLM client, S3 storage) are
+// wired based on Env so that the same binary behaves correctly in each
+// environment without per-env build tags. This file is the single
+// source of truth for what each environment requires; keep validate()
+// in sync when adding env-sensitive deps.
 package config
 
 import (
+	"embed"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
+
+// configFS holds the YAML files for every supported environment.
+// Embedding keeps deployments to a single binary — no config files to
+// ship alongside the executable.
+//
+//go:embed all:files
+var configFS embed.FS
 
 // Env identifies which environment the binary is running in.
 // Provider implementations (email, LLM, storage) are selected per Env.
@@ -34,82 +49,104 @@ func (e Env) Valid() bool {
 }
 
 type Config struct {
-	Env      Env
-	HTTPPort int
-	LogLevel string
+	Env      Env    `yaml:"env"`
+	HTTPPort int    `yaml:"-"`
+	LogLevel string `yaml:"-"`
 
-	AppBaseURL  string
-	DatabaseURL string
+	HTTP HTTPConfig `yaml:"http"`
+	Log  LogConfig  `yaml:"log"`
 
-	JWT  JWTConfig
-	SMTP SMTPConfig
-	S3   S3Config
-	LLM  LLMConfig
+	AppBaseURL  string `yaml:"-"`
+	DatabaseURL string `yaml:"-"`
+
+	App      AppConfig      `yaml:"app"`
+	Database DatabaseConfig `yaml:"database"`
+
+	JWT  JWTConfig  `yaml:"jwt"`
+	SMTP SMTPConfig `yaml:"smtp"`
+	S3   S3Config   `yaml:"s3"`
+	LLM  LLMConfig  `yaml:"llm"`
+}
+
+type HTTPConfig struct {
+	Port int `yaml:"port"`
+}
+
+type LogConfig struct {
+	Level string `yaml:"level"`
+}
+
+type AppConfig struct {
+	BaseURL string `yaml:"base_url"`
+}
+
+type DatabaseConfig struct {
+	URL string `yaml:"url"`
 }
 
 type JWTConfig struct {
-	Secret     string
-	AccessTTL  time.Duration
-	RefreshTTL time.Duration
+	Secret     string        `yaml:"secret"`
+	AccessTTL  time.Duration `yaml:"access_ttl"`
+	RefreshTTL time.Duration `yaml:"refresh_ttl"`
 }
 
 type SMTPConfig struct {
-	Host string
-	Port int
-	From string
+	Host string `yaml:"host"`
+	Port int    `yaml:"port"`
+	From string `yaml:"from"`
 }
 
 type S3Config struct {
-	Endpoint      string
-	AccessKey     string
-	SecretKey     string
-	Bucket        string
-	UsePathStyle  bool
+	Endpoint     string `yaml:"endpoint"`
+	AccessKey    string `yaml:"access_key"`
+	SecretKey    string `yaml:"secret_key"`
+	Bucket       string `yaml:"bucket"`
+	UsePathStyle bool   `yaml:"use_path_style"`
 }
 
 type LLMConfig struct {
-	Provider        string
-	OpenAIAPIKey    string
-	ExtractionModel string
-	EmbeddingModel  string
+	Provider        string `yaml:"provider"`
+	OpenAIAPIKey    string `yaml:"openai_api_key"`
+	ExtractionModel string `yaml:"extraction_model"`
+	EmbeddingModel  string `yaml:"embedding_model"`
 }
 
+// Load reads config/<APP_ENV>.yaml from the embedded FS, expands
+// ${ENV_VAR} placeholders against the process environment, and
+// validates the result.
 func Load() (Config, error) {
-	env := Env(getenv("APP_ENV", "local"))
+	envName := strings.TrimSpace(os.Getenv("APP_ENV"))
+	if envName == "" {
+		envName = "local"
+	}
+	env := Env(envName)
 	if !env.Valid() {
-		return Config{}, fmt.Errorf("invalid APP_ENV %q (want: local|test|prod)", env)
+		return Config{}, fmt.Errorf("invalid APP_ENV %q (want: local|test|prod)", envName)
 	}
 
-	cfg := Config{
-		Env:         env,
-		HTTPPort:    getenvInt("HTTP_PORT", 8080),
-		LogLevel:    getenv("LOG_LEVEL", "info"),
-		AppBaseURL:  getenv("APP_BASE_URL", "http://localhost:5173"),
-		DatabaseURL: getenv("DATABASE_URL", ""),
-		JWT: JWTConfig{
-			Secret:     getenv("JWT_SECRET", ""),
-			AccessTTL:  getenvDuration("JWT_ACCESS_TTL", 15*time.Minute),
-			RefreshTTL: getenvDuration("JWT_REFRESH_TTL", 30*24*time.Hour),
-		},
-		SMTP: SMTPConfig{
-			Host: getenv("SMTP_HOST", "localhost"),
-			Port: getenvInt("SMTP_PORT", 1025),
-			From: getenv("SMTP_FROM", "noreply@mnema.local"),
-		},
-		S3: S3Config{
-			Endpoint:     getenv("S3_ENDPOINT", ""),
-			AccessKey:    getenv("S3_ACCESS_KEY", ""),
-			SecretKey:    getenv("S3_SECRET_KEY", ""),
-			Bucket:       getenv("S3_BUCKET", ""),
-			UsePathStyle: getenvBool("S3_USE_PATH_STYLE", false),
-		},
-		LLM: LLMConfig{
-			Provider:        getenv("LLM_PROVIDER", "stub"),
-			OpenAIAPIKey:    getenv("OPENAI_API_KEY", ""),
-			ExtractionModel: getenv("LLM_EXTRACTION_MODEL", "gpt-4o-mini"),
-			EmbeddingModel:  getenv("LLM_EMBEDDING_MODEL", "text-embedding-3-small"),
-		},
+	raw, err := configFS.ReadFile("files/" + envName + ".yaml")
+	if err != nil {
+		return Config{}, fmt.Errorf("read embedded config %s.yaml: %w", envName, err)
 	}
+
+	// os.ExpandEnv replaces $VAR and ${VAR}; missing vars become "".
+	// We do this on the raw bytes before parsing so duration / int
+	// fields can themselves come from env (e.g. HTTP_PORT=9090).
+	expanded := os.ExpandEnv(string(raw))
+
+	var cfg Config
+	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
+		return Config{}, fmt.Errorf("parse %s.yaml: %w", envName, err)
+	}
+
+	// Mirror nested fields onto the flat fields the rest of the code
+	// already uses. Lets us migrate to YAML without rewriting every
+	// callsite in one go.
+	cfg.Env = env
+	cfg.HTTPPort = cfg.HTTP.Port
+	cfg.LogLevel = cfg.Log.Level
+	cfg.AppBaseURL = cfg.App.BaseURL
+	cfg.DatabaseURL = cfg.Database.URL
 
 	if err := cfg.validate(); err != nil {
 		return Config{}, err
@@ -122,52 +159,21 @@ func Load() (Config, error) {
 // secrets so we never accidentally ship the placeholder JWT secret.
 func (c Config) validate() error {
 	if c.DatabaseURL == "" {
-		return fmt.Errorf("DATABASE_URL is required")
+		return fmt.Errorf("database.url is required (APP_ENV=%s)", c.Env)
+	}
+	if c.HTTPPort <= 0 {
+		return fmt.Errorf("http.port must be > 0 (APP_ENV=%s)", c.Env)
+	}
+	if c.JWT.Secret == "" {
+		return fmt.Errorf("jwt.secret is required (APP_ENV=%s)", c.Env)
 	}
 	if c.Env == EnvProd {
-		if c.JWT.Secret == "" || c.JWT.Secret == "change-me-locally" {
-			return fmt.Errorf("JWT_SECRET must be set to a real value in prod")
+		if c.JWT.Secret == "change-me-locally" {
+			return fmt.Errorf("jwt.secret must be set to a real value in prod")
+		}
+		if c.LLM.Provider == "openai" && c.LLM.OpenAIAPIKey == "" {
+			return fmt.Errorf("llm.openai_api_key is required when llm.provider=openai")
 		}
 	}
 	return nil
-}
-
-func getenv(key, def string) string {
-	v := strings.TrimSpace(os.Getenv(key))
-	if v == "" {
-		return def
-	}
-	return v
-}
-
-func getenvInt(key string, def int) int {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return def
-	}
-	return n
-}
-
-func getenvBool(key string, def bool) bool {
-	v := strings.ToLower(os.Getenv(key))
-	if v == "" {
-		return def
-	}
-	return v == "1" || v == "true" || v == "yes"
-}
-
-func getenvDuration(key string, def time.Duration) time.Duration {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil {
-		return def
-	}
-	return d
 }

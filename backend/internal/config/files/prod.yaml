@@ -1,0 +1,48 @@
+# Mnema config — production.
+#
+# Loaded by config.Load() when APP_ENV=prod. Every secret comes from
+# the environment (or a secret manager that injects env vars) — no
+# real credentials live in this file or in the repo.
+#
+# Validation in config.validate() rejects placeholder JWT secrets and
+# missing DATABASE_URL on prod, so a misconfigured deployment fails at
+# startup, never silently with a weak default.
+
+env: prod
+
+http:
+  port: ${HTTP_PORT}
+
+log:
+  level: info
+
+app:
+  base_url: ${APP_BASE_URL}
+
+database:
+  url: ${DATABASE_URL}
+
+jwt:
+  secret: ${JWT_SECRET}
+  access_ttl: 15m
+  refresh_ttl: 720h
+
+# Resend speaks SMTP, so the same adapter as local works — only host /
+# credentials change.
+smtp:
+  host: ${SMTP_HOST}
+  port: ${SMTP_PORT}
+  from: ${SMTP_FROM}
+
+s3:
+  endpoint: ${S3_ENDPOINT}
+  access_key: ${S3_ACCESS_KEY}
+  secret_key: ${S3_SECRET_KEY}
+  bucket: ${S3_BUCKET}
+  use_path_style: false
+
+llm:
+  provider: openai
+  openai_api_key: ${OPENAI_API_KEY}
+  extraction_model: gpt-4o-mini
+  embedding_model: text-embedding-3-small

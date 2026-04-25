@@ -21,8 +21,10 @@ import (
 	"github.com/DBulamu/mnema/backend/internal/db"
 	"github.com/DBulamu/mnema/backend/internal/email"
 	"github.com/DBulamu/mnema/backend/internal/httpapi"
+	"github.com/DBulamu/mnema/backend/internal/jwtauth"
 	"github.com/DBulamu/mnema/backend/internal/logger"
 	"github.com/DBulamu/mnema/backend/internal/migrations"
+	"github.com/DBulamu/mnema/backend/internal/users"
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 )
@@ -59,17 +61,29 @@ func run() error {
 	log.Info().Msg("migrations applied")
 
 	magicLinks := auth.NewMagicLinkStore(pool)
+	sessions := auth.NewSessionStore(pool)
+	usersStore := users.NewStore(pool)
+	jwtIssuer := jwtauth.NewIssuer(cfg.JWT.Secret, cfg.JWT.AccessTTL)
 	emailSender := email.New(cfg)
 
 	mux := http.NewServeMux()
 	api := humago.New(mux, humaConfig())
+	api.UseMiddleware(httpapi.JWTMiddleware(api, jwtIssuer))
 
 	registerHealth(api)
 	httpapi.RegisterAuth(api, httpapi.AuthDeps{
 		MagicLinks: magicLinks,
+		Sessions:   sessions,
+		Users:      usersStore,
+		JWT:        jwtIssuer,
 		Email:      emailSender,
 		Logger:     log,
 		AppBaseURL: cfg.AppBaseURL,
+		RefreshTTL: cfg.JWT.RefreshTTL,
+	})
+	httpapi.RegisterMe(api, httpapi.MeDeps{
+		Users:  usersStore,
+		Logger: log,
 	})
 
 	srv := &http.Server{
@@ -105,6 +119,19 @@ func run() error {
 func humaConfig() huma.Config {
 	c := huma.DefaultConfig("Mnema API", "0.1.0")
 	c.Info.Description = "Backend API for Mnema — a digital brain for thoughts, ideas, and memories."
+	// Declare the bearer scheme so the generated OpenAPI lists it and
+	// Swagger UI shows the "Authorize" button. The middleware enforces it.
+	if c.Components == nil {
+		c.Components = &huma.Components{}
+	}
+	if c.Components.SecuritySchemes == nil {
+		c.Components.SecuritySchemes = map[string]*huma.SecurityScheme{}
+	}
+	c.Components.SecuritySchemes[httpapi.BearerSecurityName] = &huma.SecurityScheme{
+		Type:         "http",
+		Scheme:       "bearer",
+		BearerFormat: "JWT",
+	}
 	return c
 }
 

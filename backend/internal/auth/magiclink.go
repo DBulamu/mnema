@@ -17,12 +17,18 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/netip"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// ErrLinkInvalid is returned for any consume failure — wrong token, expired,
+// already used. Collapsed deliberately so attackers cannot probe state.
+var ErrLinkInvalid = errors.New("magic link invalid")
 
 const (
 	// 32 bytes = 256 bits of entropy → base64url ≈ 43 chars in the URL.
@@ -110,4 +116,38 @@ func (s *MagicLinkStore) Issue(ctx context.Context, args IssueArgs) (IssuedLink,
 		Token:     token,
 		ExpiresAt: expires,
 	}, nil
+}
+
+// ConsumedLink is what a successful Consume returns — the email the link
+// was issued to. The handler then looks up or creates the user by that
+// email and issues the session.
+type ConsumedLink struct {
+	ID    string
+	Email string
+}
+
+// Consume atomically validates and marks a magic link as used. Atomicity
+// matters: two parallel consumes of the same token must not both succeed.
+// We use a single UPDATE...WHERE consumed_at IS NULL...RETURNING — the row
+// lock guarantees only one writer wins.
+func (s *MagicLinkStore) Consume(ctx context.Context, token Token) (ConsumedLink, error) {
+	hash := HashToken(token)
+
+	row := s.pool.QueryRow(ctx, `
+		UPDATE auth_magic_links
+		SET consumed_at = now()
+		WHERE token_hash = $1
+		  AND consumed_at IS NULL
+		  AND expires_at > now()
+		RETURNING id, email
+	`, hash)
+
+	var c ConsumedLink
+	if err := row.Scan(&c.ID, &c.Email); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ConsumedLink{}, ErrLinkInvalid
+		}
+		return ConsumedLink{}, fmt.Errorf("consume magic link: %w", err)
+	}
+	return c, nil
 }

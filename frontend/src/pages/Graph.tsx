@@ -1,54 +1,14 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api, ApiError } from '../lib/api';
-
-const NODE_TYPES = [
-  'thought',
-  'idea',
-  'memory',
-  'dream',
-  'emotion',
-  'task',
-  'event',
-  'person',
-  'place',
-  'topic',
-] as const;
-
-type NodeType = (typeof NODE_TYPES)[number];
-
-type Node = {
-  id: string;
-  type: NodeType;
-  title?: string | null;
-  content?: string | null;
-  metadata?: unknown;
-  occurred_at?: string | null;
-  occurred_at_precision?: string | null;
-  activation: number;
-  last_accessed_at: string;
-  pinned: boolean;
-  source_message_id?: string | null;
-  created_at: string;
-  updated_at: string;
-};
-
-type Edge = {
-  id: string;
-  source_id: string;
-  target_id: string;
-  type: string;
-  weight: number;
-  created_at: string;
-};
-
-type GraphResp = { nodes: Node[]; edges: Edge[] };
+import { ForceGraphView } from './graph/ForceGraphView';
+import { NODE_TYPES, TYPE_COLOR } from './graph/types';
+import type { GraphResp, NodeType } from './graph/types';
 
 export function GraphPage() {
   const [selectedTypes, setSelectedTypes] = useState<Set<NodeType>>(new Set());
   const [since, setSince] = useState('');
   const [limit, setLimit] = useState(200);
-  const [showRaw, setShowRaw] = useState(false);
 
   const queryString = useMemo(() => {
     const params = new URLSearchParams();
@@ -63,11 +23,18 @@ export function GraphPage() {
     queryFn: () => api<GraphResp>(`/v1/graph?${queryString}`),
   });
 
-  const nodeById = useMemo(() => {
-    const m = new Map<string, Node>();
-    graph.data?.nodes.forEach((n) => m.set(n.id, n));
-    return m;
-  }, [graph.data]);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState({ w: 800, h: 560 });
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      const r = el.getBoundingClientRect();
+      setSize({ w: Math.max(320, Math.floor(r.width)), h: Math.max(320, Math.floor(r.height)) });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   function toggleType(t: NodeType) {
     setSelectedTypes((prev) => {
@@ -79,10 +46,11 @@ export function GraphPage() {
   }
 
   return (
-    <main>
+    <main style={{ maxWidth: 1200 }}>
       <h1>Graph</h1>
       <p className="muted">
-        Сырая выдача <code>GET /v1/graph</code>. Граф-визуализация — следующий шаг (спайк H16).
+        Граф жизни. Узлы с фотографиями отображаются круглыми портретами, остальные —
+        цветными кружками по типу. Анимация физическая: drag тянет соседей через пружины.
       </p>
 
       <section className="card" style={{ marginBottom: '1rem' }}>
@@ -96,6 +64,17 @@ export function GraphPage() {
                   checked={selectedTypes.has(t)}
                   onChange={() => toggleType(t)}
                   style={{ width: 'auto', marginRight: 4 }}
+                />
+                <span
+                  style={{
+                    display: 'inline-block',
+                    width: 8,
+                    height: 8,
+                    borderRadius: '50%',
+                    background: TYPE_COLOR[t],
+                    marginRight: 4,
+                    verticalAlign: 'middle',
+                  }}
                 />
                 {t}
               </label>
@@ -125,79 +104,44 @@ export function GraphPage() {
               {graph.isFetching ? 'Загрузка…' : 'Обновить'}
             </button>
           </div>
-          <label>
-            <input
-              type="checkbox"
-              checked={showRaw}
-              onChange={(e) => setShowRaw(e.target.checked)}
-              style={{ width: 'auto', marginRight: 4 }}
-            />
-            Показать сырой JSON
-          </label>
         </div>
       </section>
 
-      {graph.error && <p className="error">{humanize(graph.error)}</p>}
-
       {graph.data && (
-        <>
-          <p className="muted">
-            <strong>{graph.data.nodes.length}</strong> узлов · <strong>{graph.data.edges.length}</strong> связей
-          </p>
-
-          {showRaw && (
-            <details open>
-              <summary>JSON</summary>
-              <pre>{JSON.stringify(graph.data, null, 2)}</pre>
-            </details>
-          )}
-
-          <section style={{ marginTop: '1rem' }}>
-            <h2>Узлы</h2>
-            <ul className="list">
-              {graph.data.nodes.map((n) => (
-                <li key={n.id} className="card">
-                  <div className="row">
-                    <span style={{ background: '#f0f0f0', padding: '0.1rem 0.4rem', borderRadius: 3, fontSize: '0.75rem' }}>
-                      {n.type}
-                    </span>
-                    <strong>{n.title ?? '(без названия)'}</strong>
-                    <span className="spacer" style={{ flex: 1 }} />
-                    <span className="muted" style={{ fontSize: '0.75rem' }}>
-                      activation {n.activation.toFixed(2)} · {new Date(n.created_at).toLocaleString()}
-                    </span>
-                  </div>
-                  {n.content && <div style={{ marginTop: '0.25rem' }}>{n.content}</div>}
-                </li>
-              ))}
-              {graph.data.nodes.length === 0 && <li className="muted">Граф пуст. Иди в чат и напиши что-нибудь.</li>}
-            </ul>
-          </section>
-
-          <section style={{ marginTop: '1rem' }}>
-            <h2>Связи</h2>
-            <ul className="list">
-              {graph.data.edges.map((e) => {
-                const src = nodeById.get(e.source_id);
-                const tgt = nodeById.get(e.target_id);
-                return (
-                  <li key={e.id} className="card">
-                    <span>{src?.title ?? e.source_id.slice(0, 8)}</span>
-                    {' — '}
-                    <em>{e.type}</em>
-                    {' → '}
-                    <span>{tgt?.title ?? e.target_id.slice(0, 8)}</span>
-                    <span className="muted" style={{ marginLeft: '0.5rem', fontSize: '0.75rem' }}>
-                      weight {e.weight.toFixed(2)}
-                    </span>
-                  </li>
-                );
-              })}
-              {graph.data.edges.length === 0 && <li className="muted">Связей пока нет.</li>}
-            </ul>
-          </section>
-        </>
+        <div className="row" style={{ marginBottom: '0.5rem' }}>
+          <span className="spacer" style={{ flex: 1 }} />
+          <span className="muted" style={{ fontSize: '0.8rem' }}>
+            {graph.data.nodes.length} узлов · {graph.data.edges.length} связей
+          </span>
+        </div>
       )}
+
+      <div
+        ref={containerRef}
+        style={{
+          height: '70vh',
+          minHeight: 480,
+          border: '1px solid #e5e5e5',
+          borderRadius: 6,
+          background: '#fafafa',
+          position: 'relative',
+          overflow: 'hidden',
+        }}
+      >
+        {graph.error && (
+          <p className="error" style={{ padding: '1rem' }}>
+            {humanize(graph.error)}
+          </p>
+        )}
+        {graph.data && graph.data.nodes.length === 0 && (
+          <p className="muted" style={{ padding: '1rem' }}>
+            Граф пуст. Иди в чат и напиши что-нибудь.
+          </p>
+        )}
+        {graph.data && graph.data.nodes.length > 0 && (
+          <ForceGraphView data={graph.data} width={size.w} height={size.h} />
+        )}
+      </div>
     </main>
   );
 }

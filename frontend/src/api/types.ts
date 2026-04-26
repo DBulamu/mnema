@@ -80,9 +80,18 @@ export interface paths {
                         "application/json": {
                             /** @description JWT, живёт 15 минут */
                             access_token: string;
+                            /** Format: date-time */
+                            access_expires_at: string;
                             /** @description opaque, живёт 30 дней */
                             refresh_token: string;
-                            user: components["schemas"]["User"];
+                            /** Format: date-time */
+                            refresh_expires_at: string;
+                            user: {
+                                /** Format: uuid */
+                                id: string;
+                                /** Format: email */
+                                email: string;
+                            };
                         };
                     };
                 };
@@ -523,15 +532,16 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Поиск узлов по тексту и/или семантике.
-         *     Используется для revival ("вспомни про X") — вытягивает узлы из архива.
+         * Поиск узлов пользователя по тексту или семантике (revival H11).
+         *     text — ILIKE+trgm, semantic — cosine distance по embedding.
          */
         get: {
             parameters: {
                 query: {
                     q: string;
-                    /** @description Искать также среди затухших узлов */
-                    include_archived?: boolean;
+                    mode?: "text" | "semantic";
+                    /** @description Фильтр по типам узлов. CSV или повтор параметра. */
+                    type?: ("thought" | "idea" | "memory" | "dream" | "emotion" | "task" | "event" | "person" | "place" | "topic")[];
                     limit?: number;
                 };
                 header?: never;
@@ -540,18 +550,14 @@ export interface paths {
             };
             requestBody?: never;
             responses: {
-                /** @description Найденные узлы */
+                /** @description Ранжированный список узлов */
                 200: {
                     headers: {
                         [name: string]: unknown;
                     };
                     content: {
                         "application/json": {
-                            results?: {
-                                node?: components["schemas"]["Node"];
-                                /** Format: float */
-                                score?: number;
-                            }[];
+                            nodes: components["schemas"]["Node"][];
                         };
                     };
                 };
@@ -559,6 +565,64 @@ export interface paths {
         };
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/recall": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Свободный текстовый запрос → ответ с привязкой подстрок к узлам графа.
+         *     Подробности и контракт: wiki/recall-mechanics.md.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        text: string;
+                        /** @description BCP-47 / двухбуквенный код. Default `ru`. */
+                        lang?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Ответ с подсветкой */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            answer: string;
+                            spans: {
+                                /** @description Rune-offset (включительно). */
+                                start: number;
+                                /** @description Rune-offset (исключительно). */
+                                end: number;
+                                node_ids: string[];
+                            }[];
+                            nodes: components["schemas"]["Node"][];
+                            lang: string;
+                        };
+                    };
+                };
+            };
+        };
         delete?: never;
         options?: never;
         head?: never;
@@ -985,6 +1049,18 @@ export interface components {
              */
             activation: number;
             pinned?: boolean;
+            /**
+             * Format: uuid
+             * @description Сообщение из чата, из которого узел был извлечён (если применимо).
+             */
+            source_message_id?: string | null;
+            /**
+             * Format: uri
+             * @description Опциональное изображение для визуального представления узла в графе.
+             *     Если задано — узел рендерится как круглое фото; если нет — как цветной кружок по типу (H14).
+             *     На MVP заполняется seed-данными или внешними URL'ами; полноценный upload-pipeline — Фаза 5.
+             */
+            image_url?: string | null;
             media?: components["schemas"]["Media"][];
             /** Format: date-time */
             created_at: string;

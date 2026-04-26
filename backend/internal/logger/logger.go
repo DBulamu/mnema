@@ -1,39 +1,52 @@
-// Package logger configures the application-wide zerolog logger.
+// Package logger configures the application-wide structured logger.
 //
-// Local development gets a colored, human-readable console writer; test and
-// prod get structured JSON suitable for log aggregators. Every line is tagged
-// with the env name so logs from multiple deployments cannot be confused.
+// Local development gets a human-readable text writer; test and prod
+// get JSON suitable for log aggregators. Every line is tagged with the
+// env name so logs from multiple deployments cannot be confused.
+//
+// Built on stdlib log/slog (Go 1.21+) — no third-party dependency.
 package logger
 
 import (
+	"log/slog"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/DBulamu/mnema/backend/internal/config"
-	"github.com/rs/zerolog"
 )
 
-// New returns a zerolog.Logger ready for use across the app.
-// An invalid LOG_LEVEL silently falls back to Info — we prefer "noisy but
-// running" over "configured to log nothing" during incident debugging.
-func New(cfg config.Config) zerolog.Logger {
-	level := zerolog.InfoLevel
-	if l, err := zerolog.ParseLevel(strings.ToLower(cfg.LogLevel)); err == nil {
-		level = l
-	}
+// New returns a *slog.Logger ready for use across the app.
+// An invalid LOG_LEVEL silently falls back to Info — we prefer "noisy
+// but running" over "configured to log nothing" during incident
+// debugging.
+func New(cfg config.Config) *slog.Logger {
+	level := parseLevel(cfg.LogLevel)
+	opts := &slog.HandlerOptions{Level: level}
 
-	zerolog.TimeFieldFormat = time.RFC3339Nano
-
-	var l zerolog.Logger
+	var handler slog.Handler
 	if cfg.Env == config.EnvLocal {
-		// Pretty console output speeds up local dev; never use this in prod
-		// because aggregators (Loki, Datadog, etc.) expect JSON.
-		l = zerolog.New(zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: time.Kitchen}).
-			With().Timestamp().Logger()
+		// Text output is friendlier in a terminal; never use this in
+		// prod because aggregators (Loki, Datadog, etc.) expect JSON.
+		handler = slog.NewTextHandler(os.Stdout, opts)
 	} else {
-		l = zerolog.New(os.Stdout).With().Timestamp().Logger()
+		handler = slog.NewJSONHandler(os.Stdout, opts)
 	}
 
-	return l.Level(level).With().Str("env", string(cfg.Env)).Logger()
+	return slog.New(handler).With(slog.String("env", string(cfg.Env)))
+}
+
+// parseLevel maps the textual LOG_LEVEL value to a slog.Level. Anything
+// we don't recognise (typo, empty) becomes Info — see the "noisy but
+// running" preference above.
+func parseLevel(s string) slog.Level {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
 }

@@ -1,10 +1,11 @@
 package rest
 
 import (
+	"context"
+	"log/slog"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
-	"github.com/rs/zerolog"
 )
 
 // LoggingMiddleware emits one structured line per request with method,
@@ -17,17 +18,13 @@ import (
 // the ID is in context) and before JWTMiddleware is fine — when JWT is
 // successful it stores the user ID, which we pick up after next()
 // returns. When JWT rejects the request, user_id is simply absent.
-func LoggingMiddleware(log zerolog.Logger) func(huma.Context, func(huma.Context)) {
+func LoggingMiddleware(log *slog.Logger) func(huma.Context, func(huma.Context)) {
 	return func(ctx huma.Context, next func(huma.Context)) {
 		start := time.Now()
 		next(ctx)
 		elapsed := time.Since(start)
 
 		status := ctx.Status()
-		evt := log.Info()
-		if status >= 500 {
-			evt = log.Warn()
-		}
 
 		op := ctx.Operation()
 		var operationID string
@@ -35,18 +32,22 @@ func LoggingMiddleware(log zerolog.Logger) func(huma.Context, func(huma.Context)
 			operationID = op.OperationID
 		}
 
-		evt = evt.
-			Str("method", ctx.Method()).
-			Str("path", ctx.URL().Path).
-			Int("status", status).
-			Dur("latency", elapsed).
-			Str("operation", operationID).
-			Str("request_id", RequestIDFromContext(ctx.Context()))
-
+		attrs := []slog.Attr{
+			slog.String("method", ctx.Method()),
+			slog.String("path", ctx.URL().Path),
+			slog.Int("status", status),
+			slog.Duration("latency", elapsed),
+			slog.String("operation", operationID),
+			slog.String("request_id", RequestIDFromContext(ctx.Context())),
+		}
 		if uid := UserIDFromContext(ctx.Context()); uid != "" {
-			evt = evt.Str("user_id", uid)
+			attrs = append(attrs, slog.String("user_id", uid))
 		}
 
-		evt.Msg("http")
+		level := slog.LevelInfo
+		if status >= 500 {
+			level = slog.LevelWarn
+		}
+		log.LogAttrs(context.Background(), level, "http", attrs...)
 	}
 }

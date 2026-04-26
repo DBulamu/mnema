@@ -34,7 +34,7 @@ The product hypothesis: live your life, get a biography.
 | Email | Resend in prod, [mailpit](https://github.com/axllent/mailpit) locally |
 | LLM | vendor-agnostic adapter, default OpenAI (GPT-4o-mini, Whisper, text-embedding-3-small) |
 | Frontend | React + Vite + TypeScript, types generated from `docs/openapi.yaml` |
-| Logs | zerolog |
+| Logs | log/slog (stdlib) |
 | Auth | Magic-link email + JWT |
 
 The code targets three environments — `local`, `test`, `prod` — selected

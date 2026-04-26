@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -45,7 +46,7 @@ import (
 	graphuc "github.com/DBulamu/mnema/backend/internal/usecase/graph"
 	profileuc "github.com/DBulamu/mnema/backend/internal/usecase/profile"
 	recalluc "github.com/DBulamu/mnema/backend/internal/usecase/recall"
-	"github.com/rs/zerolog"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func main() {
@@ -62,7 +63,7 @@ func run() error {
 	}
 
 	log := logger.New(cfg)
-	log.Info().Int("port", cfg.HTTPPort).Msg("mnema api starting")
+	log.Info("mnema api starting", slog.Int("port", cfg.HTTPPort))
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -72,12 +73,12 @@ func run() error {
 		return fmt.Errorf("db open: %w", err)
 	}
 	defer pool.Close()
-	log.Info().Msg("postgres connected")
+	log.Info("postgres connected")
 
 	if err := migrations.Run(ctx, pool); err != nil {
 		return fmt.Errorf("migrations: %w", err)
 	}
-	log.Info().Msg("migrations applied")
+	log.Info("migrations applied")
 
 	// --- Adapters (the only place that knows about concrete tech). ---
 	clock := system.Clock{}
@@ -115,7 +116,7 @@ func run() error {
 	}
 	extractorBridge := messageExtractorBridge{
 		extract: extract,
-		log:     log.With().Str("component", "extractor").Logger(),
+		log:     log.With(slog.String("component", "extractor")),
 	}
 
 	// --- Usecases (composed from adapters). --------------------------
@@ -198,6 +199,7 @@ func run() error {
 	api.UseMiddleware(rest.JWTMiddleware(api, jwtIssuer))
 
 	rest.RegisterHealth(api)
+	rest.RegisterReady(api, dbPinger{pool: pool})
 	rest.RegisterRequestMagicLink(api, requestLink)
 	rest.RegisterConsumeMagicLink(api, consumeLink)
 	rest.RegisterRefresh(api, refresh)
@@ -213,9 +215,15 @@ func run() error {
 	rest.RegisterRecall(api, recall)
 	rest.RegisterRecallStream(api, recall)
 
+	// Wrap the mux so route mismatches (404 from ServeMux, before huma
+	// middleware runs) are visible in the log. Without this a typo'd
+	// client URL is silently dropped — the per-operation access log
+	// can't see it because no operation matched.
+	rootHandler := rest.LogUnmatchedRoutes(mux, log)
+
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.HTTPPort),
-		Handler:           mux,
+		Handler:           rootHandler,
 		ReadHeaderTimeout: 10 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
@@ -223,7 +231,7 @@ func run() error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Info().Str("addr", srv.Addr).Msg("listening")
+		log.Info("listening", slog.String("addr", srv.Addr))
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
@@ -231,7 +239,7 @@ func run() error {
 
 	select {
 	case <-ctx.Done():
-		log.Info().Msg("shutdown signal received")
+		log.Info("shutdown signal received")
 	case err := <-errCh:
 		return fmt.Errorf("http: %w", err)
 	}
@@ -239,9 +247,9 @@ func run() error {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Error().Err(err).Msg("graceful shutdown failed")
+		log.Error("graceful shutdown failed", slog.Any("err", err))
 	}
-	log.Info().Msg("bye")
+	log.Info("bye")
 	return nil
 }
 
@@ -588,13 +596,25 @@ func (b recallActivator) BumpActivation(ctx context.Context, userID string, ids 
 	return b.repo.BumpActivation(ctx, userID, ids, delta, now)
 }
 
+// dbPinger satisfies the rest.readinessChecker port by pinging the
+// pgx pool. Lives in the composition root for the same reason as the
+// other bridges — the transport stays free of pgx imports, and the
+// `Ping` shape matches whatever implementation the binary swaps in.
+type dbPinger struct {
+	pool *pgxpool.Pool
+}
+
+func (p dbPinger) Ping(ctx context.Context) error {
+	return p.pool.Ping(ctx)
+}
+
 // messageExtractorBridge satisfies chatuc.MessageExtractor by running
 // the extraction usecase and swallowing errors into the log. The
 // non-fatal contract lives here, not in the usecase — the chat path
 // stays simple and a broken extractor never blocks chat.
 type messageExtractorBridge struct {
 	extract *extractionuc.Extract
-	log     zerolog.Logger
+	log     *slog.Logger
 }
 
 func (b messageExtractorBridge) ExtractFromMessage(ctx context.Context, userID, messageID, content string) {
@@ -604,19 +624,19 @@ func (b messageExtractorBridge) ExtractFromMessage(ctx context.Context, userID, 
 		Content:   content,
 	})
 	if err != nil {
-		b.log.Warn().
-			Err(err).
-			Str("user_id", userID).
-			Str("message_id", messageID).
-			Msg("extraction failed")
+		b.log.Warn("extraction failed",
+			slog.Any("err", err),
+			slog.String("user_id", userID),
+			slog.String("message_id", messageID),
+		)
 		return
 	}
-	b.log.Debug().
-		Str("user_id", userID).
-		Str("message_id", messageID).
-		Int("nodes", len(out.NodeIDs)).
-		Int("edges", len(out.EdgeIDs)).
-		Int("embedded", out.Embedded).
-		Int("embed_failures", out.EmbedFailures).
-		Msg("extraction stored")
+	b.log.Debug("extraction stored",
+		slog.String("user_id", userID),
+		slog.String("message_id", messageID),
+		slog.Int("nodes", len(out.NodeIDs)),
+		slog.Int("edges", len(out.EdgeIDs)),
+		slog.Int("embedded", out.Embedded),
+		slog.Int("embed_failures", out.EmbedFailures),
+	)
 }

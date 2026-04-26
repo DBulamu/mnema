@@ -8,7 +8,7 @@ of truth is [`../docs/openapi.yaml`](../docs/openapi.yaml).
 Empty placeholder. Next steps:
 
 1. `go mod init github.com/DBulamu/mnema/backend`
-2. Skeleton: `cmd/api/main.go`, env config, structured logger (zerolog).
+2. Skeleton: `cmd/api/main.go`, env config, structured logger (log/slog).
 3. Wire goose migrations from `../migrations/` (embed via `//go:embed`).
 4. First endpoint: `POST /auth/magic-link/request` — full path
    email → DB → mailpit.

@@ -47,3 +47,8 @@ llm:
   openai_api_key: ""
   extraction_model: gpt-4o-mini
   embedding_model: text-embedding-3-small
+  # Tests run against the recall stub triplet — no ollama dependency.
+  recall:
+    provider: stub
+    ollama_url: ""
+    ollama_model: ""

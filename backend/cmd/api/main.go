@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -170,7 +171,12 @@ func run() error {
 		Embedder: embedder,
 	}
 
-	recall, err := selectRecall(cfg)
+	recallFinder := &recalluc.SearchCandidatesFinder{
+		SearchByText:   recallTextBridge{repo: nodesRepo},
+		SearchByVector: recallVectorBridge{repo: nodesRepo},
+		Embed:          embedder,
+	}
+	recall, err := selectRecall(cfg, recallFinder)
 	if err != nil {
 		return fmt.Errorf("select recall: %w", err)
 	}
@@ -344,22 +350,55 @@ func selectEmbedder(cfg config.Config) (extractionuc.Embedder, error) {
 	}
 }
 
-// selectRecall builds the recall pipeline. Today every provider lands
-// on the stub triplet — the LLM-driven anchor extractor, candidate
-// finder, and answer generator are scheduled in Phase 4.5 of the
-// roadmap. Branching on cfg.LLM.Provider already, so the OpenAI/local
-// LLM wiring will only need to flip the cases below without touching
-// the call site.
-func selectRecall(cfg config.Config) (*recalluc.Recall, error) {
-	switch cfg.LLM.Provider {
-	case config.LLMProviderUnset, config.LLMProviderStub, config.LLMProviderOpenAI:
+// selectRecall builds the recall pipeline. Recall has its own provider
+// switch (cfg.LLM.Recall.Provider) — it's normal to run chat on stub or
+// OpenAI while recall lives on a local ollama, so we don't tie the two.
+//
+// The candidate finder is the same in every branch: text + phrasal-
+// embedding search runs against the user's graph regardless of which
+// LLM produces anchors and answers. That's why finder is a parameter,
+// not branched on provider.
+func selectRecall(cfg config.Config, finder recalluc.CandidateFinder) (*recalluc.Recall, error) {
+	switch cfg.LLM.Recall.Provider {
+	case config.LLMProviderUnset, config.LLMProviderStub:
 		return &recalluc.Recall{
 			Anchors:    llmadapter.NewRecallAnchorsStub(),
-			Candidates: llmadapter.NewRecallCandidatesStub(),
+			Candidates: finder,
+			Answers:    llmadapter.NewRecallAnswersStub(),
+		}, nil
+	case config.LLMProviderOllama:
+		model := strings.TrimSpace(cfg.LLM.Recall.OllamaModel)
+		if model == "" {
+			return nil, fmt.Errorf("llm.recall.ollama_model is required when llm.recall.provider=ollama")
+		}
+		opts := []llmadapter.OllamaOption{}
+		if u := strings.TrimSpace(cfg.LLM.Recall.OllamaURL); u != "" {
+			opts = append(opts, llmadapter.WithOllamaBaseURL(u))
+		}
+		anchors, err := llmadapter.NewRecallAnchorsOllama(model, opts...)
+		if err != nil {
+			return nil, fmt.Errorf("recall anchors ollama: %w", err)
+		}
+		answers, err := llmadapter.NewRecallAnswersOllama(model, opts...)
+		if err != nil {
+			return nil, fmt.Errorf("recall answers ollama: %w", err)
+		}
+		return &recalluc.Recall{
+			Anchors:    anchors,
+			Candidates: finder,
+			Answers:    answers,
+		}, nil
+	case config.LLMProviderOpenAI:
+		// OpenAI-backed recall is on the roadmap but not wired yet —
+		// leave it on stubs so a misconfigured deploy serves an honest
+		// "model not connected" answer instead of erroring out.
+		return &recalluc.Recall{
+			Anchors:    llmadapter.NewRecallAnchorsStub(),
+			Candidates: finder,
 			Answers:    llmadapter.NewRecallAnswersStub(),
 		}, nil
 	default:
-		return nil, fmt.Errorf("unknown llm provider %q", cfg.LLM.Provider)
+		return nil, fmt.Errorf("unknown recall provider %q", cfg.LLM.Recall.Provider)
 	}
 }
 
@@ -429,6 +468,37 @@ func (b graphSearchNodesBridge) Search(ctx context.Context, p graphuc.NodeSearch
 		Vector: p.Vector,
 		Types:  p.Types,
 		Limit:  p.Limit,
+	})
+}
+
+// recallTextBridge satisfies recall.TextSearcher by delegating to the
+// pgnodes adapter in text mode. The recall finder defines its own
+// minimal port so it doesn't import graph or pgnodes — the bridge
+// hides that boundary the same way every other bridge in this file
+// does.
+type recallTextBridge struct {
+	repo *pgnodes.Repo
+}
+
+func (b recallTextBridge) SearchByText(ctx context.Context, userID, query string, limit int) ([]domain.Node, error) {
+	return b.repo.Search(ctx, pgnodes.SearchParams{
+		UserID: userID,
+		Query:  query,
+		Limit:  limit,
+	})
+}
+
+// recallVectorBridge satisfies recall.VectorSearcher with the same
+// adapter in semantic mode.
+type recallVectorBridge struct {
+	repo *pgnodes.Repo
+}
+
+func (b recallVectorBridge) SearchByVector(ctx context.Context, userID string, vector []float32, limit int) ([]domain.Node, error) {
+	return b.repo.Search(ctx, pgnodes.SearchParams{
+		UserID: userID,
+		Vector: vector,
+		Limit:  limit,
 	})
 }
 

@@ -46,3 +46,11 @@ llm:
   openai_api_key: ${OPENAI_API_KEY}
   extraction_model: gpt-4o-mini
   embedding_model: text-embedding-3-small
+  # Recall in prod stays on stubs until we ship a hosted local LLM
+  # (or decide to flip recall to OpenAI). Stub-recall in prod returns
+  # "Пока не могу вспомнить — модель ещё не подключена.", which is
+  # honest and safe.
+  recall:
+    provider: stub
+    ollama_url: ${OLLAMA_URL}
+    ollama_model: ${OLLAMA_MODEL}

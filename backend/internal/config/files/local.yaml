@@ -51,3 +51,11 @@ llm:
   openai_api_key: ${OPENAI_API_KEY}
   extraction_model: gpt-4o-mini
   embedding_model: text-embedding-3-small
+  # Recall pipeline uses its own provider switch — running chat on
+  # stub/openai while recall stays on a local ollama is supported.
+  # Default on local dev is ollama+qwen2.5:7b so /v1/recall returns
+  # real answers without an OpenAI key.
+  recall:
+    provider: ollama
+    ollama_url: http://localhost:11434
+    ollama_model: qwen2.5:7b

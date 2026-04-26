@@ -118,11 +118,16 @@ const (
 	// LLMProviderOpenAI is the public OpenAI chat-completions API
 	// (also used for OpenAI-compatible endpoints via WithOpenAIBaseURL).
 	LLMProviderOpenAI LLMProvider = "openai"
+	// LLMProviderOllama is a locally-hosted ollama daemon. Today only
+	// the recall pipeline opts in — chat / extraction / embeddings
+	// keep going through stub or openai. Recall's first MVP runs
+	// fully local (qwen2.5:7b) for privacy and zero per-request cost.
+	LLMProviderOllama LLMProvider = "ollama"
 )
 
 func (p LLMProvider) Valid() bool {
 	switch p {
-	case LLMProviderUnset, LLMProviderStub, LLMProviderOpenAI:
+	case LLMProviderUnset, LLMProviderStub, LLMProviderOpenAI, LLMProviderOllama:
 		return true
 	}
 	return false
@@ -133,6 +138,19 @@ type LLMConfig struct {
 	OpenAIAPIKey    string      `yaml:"openai_api_key"`
 	ExtractionModel string      `yaml:"extraction_model"`
 	EmbeddingModel  string      `yaml:"embedding_model"`
+
+	// Recall uses its own provider switch — running the chat path on
+	// OpenAI while recall stays on a local ollama is a supported and
+	// expected combo on the MVP.
+	Recall RecallLLMConfig `yaml:"recall"`
+}
+
+// RecallLLMConfig configures the recall pipeline's LLM steps separately
+// from the chat / extraction / embedding paths.
+type RecallLLMConfig struct {
+	Provider   LLMProvider `yaml:"provider"`
+	OllamaURL  string      `yaml:"ollama_url"`
+	OllamaModel string     `yaml:"ollama_model"`
 }
 
 // envVarName is the OS environment variable that selects which YAML
@@ -202,7 +220,10 @@ func (c Config) validate() error {
 		return fmt.Errorf("jwt.secret is required (APP_ENV=%s)", c.Env)
 	}
 	if !c.LLM.Provider.Valid() {
-		return fmt.Errorf("invalid llm.provider %q (want: stub|openai)", c.LLM.Provider)
+		return fmt.Errorf("invalid llm.provider %q (want: stub|openai|ollama)", c.LLM.Provider)
+	}
+	if !c.LLM.Recall.Provider.Valid() {
+		return fmt.Errorf("invalid llm.recall.provider %q (want: stub|openai|ollama)", c.LLM.Recall.Provider)
 	}
 	if c.Env == EnvProd {
 		if c.JWT.Secret == jwtSecretPlaceholder {

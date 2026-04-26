@@ -129,7 +129,7 @@ func (uc *SendMessage) Run(ctx context.Context, in SendMessageInput) (SendMessag
 		return SendMessageOutput{}, err
 	}
 
-	prior, err := uc.History.ListByConversation(ctx, in.ConversationID, historyContextLimit)
+	prior, err := uc.History.ListByConversation(ctx, in.ConversationID, historyContextLimit, nil)
 	if err != nil {
 		return SendMessageOutput{}, fmt.Errorf("load history: %w", err)
 	}
@@ -231,7 +231,7 @@ func (uc *SendMessage) RunStream(ctx context.Context, in SendMessageInput, emit 
 		return err
 	}
 
-	prior, err := uc.History.ListByConversation(ctx, in.ConversationID, historyContextLimit)
+	prior, err := uc.History.ListByConversation(ctx, in.ConversationID, historyContextLimit, nil)
 	if err != nil {
 		return fmt.Errorf("load history: %w", err)
 	}

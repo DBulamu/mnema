@@ -500,6 +500,11 @@ paths:
     get:
       tags: [chat]
       summary: Список тредов пользователя
+      description: |
+        Threads ordered freshest-first by `updated_at`. Pagination —
+        keyset на `(updated_at, id)`. Передавайте `next_cursor` из
+        предыдущего ответа чтобы получить более старую страницу.
+        Опаковый формат — клиенту парсить нельзя.
       parameters:
         - in: query
           name: limit
@@ -511,6 +516,7 @@ paths:
           name: cursor
           schema:
             type: string
+            description: Opaque keyset-курсор предыдущей страницы
       responses:
         '200':
           description: Список тредов
@@ -526,6 +532,9 @@ paths:
                   next_cursor:
                     type: string
                     nullable: true
+                    description: Передать следующим запросом; отсутствие — больше нет страниц
+        '400':
+          $ref: '#/components/responses/BadRequest'
 
     post:
       tags: [chat]
@@ -548,13 +557,25 @@ paths:
           format: uuid
     get:
       tags: [chat]
-      summary: Получить тред с сообщениями
+      summary: Получить тред со страницей сообщений
+      description: |
+        Возвращает тред + страницу сообщений в хронологическом порядке (старые сверху).
+        Курсор семантически — "загрузить старее": клиент держит самое старое
+        видимое сообщение и передаёт его cursor чтобы получить страницу под ним.
+        `next_cursor` всегда якорится на самом старом возвращённом сообщении;
+        пустой/отсутствующий — больше нет истории.
       parameters:
         - in: query
           name: limit
           schema:
             type: integer
             default: 50
+            maximum: 200
+        - in: query
+          name: cursor
+          schema:
+            type: string
+            description: Opaque keyset-курсор предыдущей страницы (load older)
       responses:
         '200':
           description: Тред с сообщениями
@@ -569,6 +590,12 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/Message'
+                  next_cursor:
+                    type: string
+                    nullable: true
+                    description: Передать следующим запросом для загрузки более старой истории; отсутствие — конец
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '404':
           $ref: '#/components/responses/NotFound'
 

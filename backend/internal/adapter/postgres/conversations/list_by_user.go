@@ -5,20 +5,41 @@ import (
 	"fmt"
 
 	"github.com/DBulamu/mnema/backend/internal/domain"
+	"github.com/jackc/pgx/v5"
 )
 
-// ListByUser returns the user's conversations, freshest first. MVP uses
-// a plain LIMIT — the (user_id, updated_at DESC) index keeps this cheap
-// up to thousands of rows. Cursor pagination is left for when we need
-// to page beyond a single user's recent activity.
-func (r *Repo) ListByUser(ctx context.Context, userID string, limit int) ([]domain.Conversation, error) {
-	rows, err := r.pool.Query(ctx, `
-		SELECT id, user_id, title, created_at, updated_at
-		FROM conversations
-		WHERE user_id = $1
-		ORDER BY updated_at DESC
-		LIMIT $2
-	`, userID, limit)
+// ListByUser returns the user's conversations, freshest first. When
+// after is nil this is a plain "first page". When after points at the
+// last row of the previous page, the query uses the row-comparison
+// keyset on (updated_at, id) to skip ahead — equivalent to OFFSET but
+// stable under inserts and indexable on (user_id, updated_at DESC, id
+// DESC).
+func (r *Repo) ListByUser(
+	ctx context.Context,
+	userID string,
+	limit int,
+	after *domain.ConversationCursor,
+) ([]domain.Conversation, error) {
+	const baseSelect = `SELECT id, user_id, title, created_at, updated_at FROM conversations`
+
+	var (
+		rows pgx.Rows
+		err  error
+	)
+	if after == nil {
+		rows, err = r.pool.Query(ctx, baseSelect+`
+			WHERE user_id = $1
+			ORDER BY updated_at DESC, id DESC
+			LIMIT $2
+		`, userID, limit)
+	} else {
+		rows, err = r.pool.Query(ctx, baseSelect+`
+			WHERE user_id = $1
+			  AND (updated_at, id) < ($2, $3)
+			ORDER BY updated_at DESC, id DESC
+			LIMIT $4
+		`, userID, after.UpdatedAt, after.ID, limit)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("list conversations: %w", err)
 	}

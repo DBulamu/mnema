@@ -154,7 +154,7 @@ func (f *fakeMsgs) Append(_ context.Context, _ string, _ domain.MessageRole, _ s
 	return m, nil
 }
 
-func (f *fakeMsgs) ListByConversation(_ context.Context, _ string, _ int) ([]domain.Message, error) {
+func (f *fakeMsgs) ListByConversation(_ context.Context, _ string, _ int, _ *domain.MessageCursor) ([]domain.Message, error) {
 	return nil, nil
 }
 

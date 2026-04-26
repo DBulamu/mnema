@@ -164,6 +164,10 @@ func run() error {
 		Nodes: graphNodesBridge{repo: nodesRepo},
 		Edges: edgesRepo,
 	}
+	searchGraph := &graphuc.Search{
+		Nodes:    graphSearchNodesBridge{repo: nodesRepo},
+		Embedder: embedder,
+	}
 
 	// --- Transport (handlers + middleware). --------------------------
 	api, mux := rest.NewAPI(
@@ -190,6 +194,7 @@ func run() error {
 	rest.RegisterGetConversation(api, getConversation)
 	rest.RegisterSendMessage(api, sendMessage)
 	rest.RegisterGetGraph(api, getGraph)
+	rest.RegisterSearchGraph(api, searchGraph)
 
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.HTTPPort),
@@ -380,6 +385,23 @@ func (b graphNodesBridge) ListForGraph(ctx context.Context, p graphuc.NodeListPa
 		UserID: p.UserID,
 		Types:  p.Types,
 		Since:  p.Since,
+		Limit:  p.Limit,
+	})
+}
+
+// graphSearchNodesBridge bridges graphuc.NodeSearchParams (consumer-side)
+// to the adapter's pgnodes.SearchParams. Same nominal-vs-structural copy
+// as the other postgres bridges.
+type graphSearchNodesBridge struct {
+	repo *pgnodes.Repo
+}
+
+func (b graphSearchNodesBridge) Search(ctx context.Context, p graphuc.NodeSearchParams) ([]domain.Node, error) {
+	return b.repo.Search(ctx, pgnodes.SearchParams{
+		UserID: p.UserID,
+		Query:  p.Query,
+		Vector: p.Vector,
+		Types:  p.Types,
 		Limit:  p.Limit,
 	})
 }

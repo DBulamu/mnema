@@ -17,7 +17,7 @@ func (r *Repo) ListByUser(ctx context.Context, userID string, limit int) ([]doma
 			id, user_id, type, title, content, metadata,
 			occurred_at, occurred_at_precision,
 			activation, last_accessed_at, pinned,
-			source_message_id, created_at, updated_at
+			source_message_id, image_url, created_at, updated_at
 		FROM nodes
 		WHERE user_id = $1 AND deleted_at IS NULL
 		ORDER BY created_at DESC
@@ -40,7 +40,7 @@ func (r *Repo) ListByUser(ctx context.Context, userID string, limit int) ([]doma
 			&n.ID, &n.UserID, &typeStr, &n.Title, &n.Content, &metaRaw,
 			&n.OccurredAt, &precisionStr,
 			&n.Activation, &n.LastAccessedAt, &n.Pinned,
-			&n.SourceMessageID, &n.CreatedAt, &n.UpdatedAt,
+			&n.SourceMessageID, &n.ImageURL, &n.CreatedAt, &n.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan node: %w", err)
 		}

@@ -18,7 +18,7 @@ func (r *Repo) GetByID(ctx context.Context, id, userID string) (domain.Node, err
 			id, user_id, type, title, content, metadata,
 			occurred_at, occurred_at_precision,
 			activation, last_accessed_at, pinned,
-			source_message_id, created_at, updated_at
+			source_message_id, image_url, created_at, updated_at
 		FROM nodes
 		WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
 	`, id, userID)
@@ -33,7 +33,7 @@ func (r *Repo) GetByID(ctx context.Context, id, userID string) (domain.Node, err
 		&n.ID, &n.UserID, &typeStr, &n.Title, &n.Content, &metaRaw,
 		&n.OccurredAt, &precisionStr,
 		&n.Activation, &n.LastAccessedAt, &n.Pinned,
-		&n.SourceMessageID, &n.CreatedAt, &n.UpdatedAt,
+		&n.SourceMessageID, &n.ImageURL, &n.CreatedAt, &n.UpdatedAt,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return domain.Node{}, domain.ErrNodeNotFound

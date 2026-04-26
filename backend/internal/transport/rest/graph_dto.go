@@ -27,8 +27,12 @@ type nodeDTO struct {
 	LastAccessedAt      string  `json:"last_accessed_at" format:"date-time"`
 	Pinned              bool    `json:"pinned"`
 	SourceMessageID     *string `json:"source_message_id,omitempty" format:"uuid"`
-	CreatedAt           string  `json:"created_at" format:"date-time"`
-	UpdatedAt           string  `json:"updated_at" format:"date-time"`
+	// ImageURL, if set, asks the client to render the node as a circular
+	// photo in the graph view. Omitted when the node has no picture (the
+	// frontend then falls back to a colored circle by type, H14).
+	ImageURL  *string `json:"image_url,omitempty" format:"uri"`
+	CreatedAt string  `json:"created_at" format:"date-time"`
+	UpdatedAt string  `json:"updated_at" format:"date-time"`
 }
 
 func toNodeDTO(n domain.Node) nodeDTO {
@@ -42,6 +46,7 @@ func toNodeDTO(n domain.Node) nodeDTO {
 		LastAccessedAt:  n.LastAccessedAt.UTC().Format(time.RFC3339),
 		Pinned:          n.Pinned,
 		SourceMessageID: n.SourceMessageID,
+		ImageURL:        n.ImageURL,
 		CreatedAt:       n.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt:       n.UpdatedAt.UTC().Format(time.RFC3339),
 	}

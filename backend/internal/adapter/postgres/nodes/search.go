@@ -112,7 +112,7 @@ func (r *Repo) Search(ctx context.Context, p SearchParams) ([]domain.Node, error
 			id, user_id, type, title, content, metadata,
 			occurred_at, occurred_at_precision,
 			activation, last_accessed_at, pinned,
-			source_message_id, created_at, updated_at%s
+			source_message_id, image_url, created_at, updated_at%s
 		FROM nodes
 		WHERE %s
 		ORDER BY %s
@@ -138,7 +138,7 @@ func (r *Repo) Search(ctx context.Context, p SearchParams) ([]domain.Node, error
 			&n.ID, &n.UserID, &typeStr, &n.Title, &n.Content, &metaRaw,
 			&n.OccurredAt, &precisionStr,
 			&n.Activation, &n.LastAccessedAt, &n.Pinned,
-			&n.SourceMessageID, &n.CreatedAt, &n.UpdatedAt,
+			&n.SourceMessageID, &n.ImageURL, &n.CreatedAt, &n.UpdatedAt,
 		}
 		if hasVector {
 			dest = append(dest, &distance)

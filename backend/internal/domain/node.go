@@ -88,6 +88,13 @@ type Node struct {
 	// is open).
 	SourceMessageID *string
 
+	// ImageURL is an optional picture displayed on the node in the graph
+	// view: when set the node renders as a circular photo, otherwise as
+	// a colored circle by type (H14). Held as a plain URL because a real
+	// upload pipeline (S3 presigned + thumbnails) lives in Phase 5; for
+	// now seed data and externally-hosted images are the only writers.
+	ImageURL *string
+
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }

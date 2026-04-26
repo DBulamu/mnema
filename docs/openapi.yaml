@@ -150,6 +150,19 @@ components:
           description: Вес узла (0=затух, 1=активен). См. H11, H18.
         pinned:
           type: boolean
+        source_message_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Сообщение из чата, из которого узел был извлечён (если применимо).
+        image_url:
+          type: string
+          format: uri
+          nullable: true
+          description: |-
+            Опциональное изображение для визуального представления узла в графе.
+            Если задано — узел рендерится как круглое фото; если нет — как цветной кружок по типу (H14).
+            На MVP заполняется seed-данными или внешними URL'ами; полноценный upload-pipeline — Фаза 5.
         media:
           type: array
           items:

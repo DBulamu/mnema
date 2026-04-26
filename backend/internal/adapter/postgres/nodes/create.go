@@ -25,6 +25,8 @@ type CreateParams struct {
 	OccurredAt          *time.Time
 	OccurredAtPrecision *string
 	SourceMessageID     *string
+	// ImageURL is optional. nil means "no picture on this node".
+	ImageURL *string
 }
 
 // Create inserts a new node and returns it as a domain.Node.
@@ -41,17 +43,17 @@ func (r *Repo) Create(ctx context.Context, p CreateParams) (domain.Node, error) 
 	row := r.pool.QueryRow(ctx, `
 		INSERT INTO nodes (
 			user_id, type, title, content, metadata,
-			occurred_at, occurred_at_precision, source_message_id
+			occurred_at, occurred_at_precision, source_message_id, image_url
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		RETURNING
 			id, user_id, type, title, content, metadata,
 			occurred_at, occurred_at_precision,
 			activation, last_accessed_at, pinned,
-			source_message_id, created_at, updated_at
+			source_message_id, image_url, created_at, updated_at
 	`,
 		p.UserID, p.Type, p.Title, p.Content, metadataBytes,
-		p.OccurredAt, p.OccurredAtPrecision, p.SourceMessageID,
+		p.OccurredAt, p.OccurredAtPrecision, p.SourceMessageID, p.ImageURL,
 	)
 
 	var (
@@ -64,7 +66,7 @@ func (r *Repo) Create(ctx context.Context, p CreateParams) (domain.Node, error) 
 		&n.ID, &n.UserID, &typeStr, &n.Title, &n.Content, &metaRaw,
 		&n.OccurredAt, &precisionStr,
 		&n.Activation, &n.LastAccessedAt, &n.Pinned,
-		&n.SourceMessageID, &n.CreatedAt, &n.UpdatedAt,
+		&n.SourceMessageID, &n.ImageURL, &n.CreatedAt, &n.UpdatedAt,
 	); err != nil {
 		return domain.Node{}, fmt.Errorf("insert node: %w", err)
 	}

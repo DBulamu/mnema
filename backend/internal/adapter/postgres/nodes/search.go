@@ -85,11 +85,20 @@ func (r *Repo) Search(ctx context.Context, p SearchParams) ([]domain.Node, error
 			" AND (title ILIKE $%d OR content ILIKE $%d)",
 			patternIdx, patternIdx,
 		)
-		// Title hits rank above content hits — the title is a curated
-		// label and a match there is far more likely to be the node
-		// the user means.
+		// Ranking precedence (H11 + H18):
+		//   1. pinned nodes always above the rest — pinning is the
+		//      user's explicit "this matters", we honor it absolutely.
+		//   2. title hits above content hits — the title is curated.
+		//   3. effective activation (activation × time-decay) DESC —
+		//      a recently-revived node beats a 6-month-stale one even
+		//      if both match the pattern.
+		//   4. created_at DESC — final tie-break.
+		// Decay rate matches recall.DecayRatePerDay (1/30 day^-1).
 		orderBy = fmt.Sprintf(
-			"CASE WHEN title ILIKE $%d THEN 0 ELSE 1 END, created_at DESC",
+			"pinned DESC, "+
+				"CASE WHEN title ILIKE $%d THEN 0 ELSE 1 END, "+
+				"activation * EXP(-(EXTRACT(EPOCH FROM (now() - last_accessed_at))/86400.0) / 30.0) DESC, "+
+				"created_at DESC",
 			patternIdx,
 		)
 	} else {
@@ -101,7 +110,10 @@ func (r *Repo) Search(ctx context.Context, p SearchParams) ([]domain.Node, error
 		args = append(args, encodePgvector(p.Vector))
 		vecIdx := len(args)
 		extraSelect = fmt.Sprintf(", (embedding <=> $%d::vector) AS distance", vecIdx)
-		orderBy = "distance ASC"
+		// Pinned still wins; otherwise cosine distance is the primary
+		// signal (it already encodes meaning), with activation as a
+		// tie-break for near-identical distances.
+		orderBy = "pinned DESC, distance ASC, activation DESC"
 	}
 
 	args = append(args, p.Limit)

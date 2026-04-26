@@ -104,6 +104,57 @@ func TestOpenAIReply_EmptyChoices(t *testing.T) {
 	}
 }
 
+// TestOpenAIReply_MaxTokensWired confirms the cost-floor option ends up
+// on the wire, while zero (the default) leaves the field absent so we
+// don't accidentally pin every reply to 0 tokens.
+func TestOpenAIReply_MaxTokensWired(t *testing.T) {
+	cases := []struct {
+		name      string
+		opts      []OpenAIOption
+		wantWire  string // exact substring expected in the JSON body
+		bannedKey string // empty means we don't care; otherwise must NOT appear
+	}{
+		{
+			name:      "explicit cap",
+			opts:      []OpenAIOption{WithOpenAIMaxTokens(128)},
+			wantWire:  `"max_tokens":128`,
+			bannedKey: "",
+		},
+		{
+			name:      "default omits field",
+			opts:      nil,
+			wantWire:  "",
+			bannedKey: "max_tokens",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var seen string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				seen = string(body)
+				_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+			}))
+			defer srv.Close()
+
+			opts := append([]OpenAIOption{WithOpenAIBaseURL(srv.URL)}, tc.opts...)
+			client, err := NewOpenAI("k", "m", opts...)
+			if err != nil {
+				t.Fatalf("NewOpenAI: %v", err)
+			}
+			if _, err := client.Reply(context.Background(), []Turn{{Role: "user", Content: "x"}}); err != nil {
+				t.Fatalf("Reply: %v", err)
+			}
+			if tc.wantWire != "" && !strings.Contains(seen, tc.wantWire) {
+				t.Errorf("body %q does not contain %q", seen, tc.wantWire)
+			}
+			if tc.bannedKey != "" && strings.Contains(seen, tc.bannedKey) {
+				t.Errorf("body %q unexpectedly contains %q", seen, tc.bannedKey)
+			}
+		})
+	}
+}
+
 // TestNewOpenAI_ValidatesArgs ensures construction fails fast rather
 // than letting a misconfigured client reach a real network call.
 func TestNewOpenAI_ValidatesArgs(t *testing.T) {

@@ -112,7 +112,7 @@ export function ForceGraphView({ data, width, height }: Props) {
       graphData={graph}
       width={width}
       height={height}
-      backgroundColor="#fafafa"
+      backgroundColor="#1a1a1a"
       nodeRelSize={6}
       nodeVal={(n) => 1 + Math.sqrt(n.degree) * 1.4}
       // Obsidian-style behavior: the simulation lays the graph out, then
@@ -141,10 +141,13 @@ export function ForceGraphView({ data, width, height }: Props) {
         fgRef.current?.d3ReheatSimulation();
       }}
       linkColor={(l) => {
+        // Edges are light strokes against the charcoal canvas. Dim
+        // unrelated edges to ~6% opacity on hover so the highlighted
+        // neighborhood pops without blanking the rest of the graph.
         const src = typeof l.source === 'object' ? (l.source as FGNode).id : (l.source as string);
         const tgt = typeof l.target === 'object' ? (l.target as FGNode).id : (l.target as string);
         const dim = hoverId && !(isHighlighted(src) && isHighlighted(tgt));
-        return dim ? 'rgba(0,0,0,0.05)' : 'rgba(0,0,0,0.25)';
+        return dim ? 'rgba(220,221,222,0.06)' : 'rgba(220,221,222,0.28)';
       }}
       linkWidth={(l) => {
         const src = typeof l.source === 'object' ? (l.source as FGNode).id : (l.source as string);
@@ -193,25 +196,27 @@ export function ForceGraphView({ data, width, height }: Props) {
           ctx.arc(cx, cy, radius, 0, 2 * Math.PI);
           ctx.fillStyle = color;
           ctx.fill();
+          // Thin charcoal-tinted ring keeps the disc readable against the
+          // dot-grid backdrop without reading as a "selected" outline.
           ctx.lineWidth = 1;
-          ctx.strokeStyle = '#fff';
+          ctx.strokeStyle = 'rgba(54,54,54,0.9)';
           ctx.stroke();
         }
 
         // Always-visible label below the node. Font size scales inversely
         // with zoom but is clamped so it never disappears or overpowers.
         const fontPx = Math.max(11, Math.min(14, 13 / Math.max(globalScale, 0.7)));
-        ctx.font = `${fontPx}px -apple-system, BlinkMacSystemFont, sans-serif`;
+        ctx.font = `${fontPx}px Inter, -apple-system, BlinkMacSystemFont, sans-serif`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
         const text = n.label.length > 28 ? n.label.slice(0, 27) + '…' : n.label;
         const ty = cy + radius + 3;
-        // White stroke first acts as a halo so the label stays legible
-        // over edges and other nodes regardless of the background color.
+        // Charcoal halo so the light label stays legible over edges or
+        // an adjacent node — same idea as before, inverted for dark mode.
         ctx.lineWidth = 3;
-        ctx.strokeStyle = 'rgba(250,250,250,0.95)';
+        ctx.strokeStyle = 'rgba(26,26,26,0.95)';
         ctx.strokeText(text, cx, ty);
-        ctx.fillStyle = '#1a1a1a';
+        ctx.fillStyle = '#dcddde';
         ctx.fillText(text, cx, ty);
         ctx.globalAlpha = 1;
       }}

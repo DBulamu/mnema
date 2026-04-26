@@ -201,12 +201,12 @@ export function ChatPage() {
             <>
               <div
                 style={{
-                  border: '1px solid #e5e5e5',
-                  borderRadius: 6,
-                  padding: '0.75rem',
-                  height: 480,
+                  border: '1px solid var(--border-subtle)',
+                  borderRadius: 'var(--radius-lg)',
+                  padding: '0.95rem',
+                  height: 520,
                   overflowY: 'auto',
-                  background: '#fff',
+                  background: 'var(--bg-panel)',
                 }}
               >
                 {conversation.data.messages.length === 0 && (

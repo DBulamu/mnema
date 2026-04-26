@@ -33,18 +33,20 @@ export type GraphEdge = {
 
 export type GraphResp = { nodes: GraphNode[]; edges: GraphEdge[] };
 
-// Palette tuned to read on a light background. One color per node type.
+// Palette tuned for the Obsidian-style charcoal canvas — saturated
+// enough to read against #1a1a1a, muted enough to not clash with the
+// lavender accent. One color per node type.
 export const TYPE_COLOR: Record<NodeType, string> = {
-  thought: '#6b7280',
+  thought: '#9ca3af',
   idea: '#f59e0b',
-  memory: '#8b5cf6',
-  dream: '#ec4899',
-  emotion: '#ef4444',
-  task: '#10b981',
-  event: '#3b82f6',
-  person: '#0ea5e9',
-  place: '#14b8a6',
-  topic: '#a855f7',
+  memory: '#a78bfa',
+  dream: '#f472b6',
+  emotion: '#f87171',
+  task: '#34d399',
+  event: '#60a5fa',
+  person: '#38bdf8',
+  place: '#2dd4bf',
+  topic: '#c084fc',
 };
 
 export function nodeLabel(n: GraphNode): string {

@@ -39,11 +39,12 @@ const openaiErrorBodyLogLimit = 500
 // The same struct is wired in prod for any OpenAI-compatible endpoint
 // (including OpenRouter and self-hosted vLLM): override BaseURL.
 type OpenAI struct {
-	apiKey  string
-	model   string
-	baseURL string
-	system  string
-	http    *http.Client
+	apiKey    string
+	model     string
+	baseURL   string
+	system    string
+	maxTokens int
+	http      *http.Client
 }
 
 // OpenAIOption configures an OpenAI client at construction time.
@@ -66,6 +67,15 @@ func WithOpenAISystemPrompt(prompt string) OpenAIOption {
 // tests (httptest.Server) and to plug in a tracing transport.
 func WithOpenAIHTTPClient(c *http.Client) OpenAIOption {
 	return func(o *OpenAI) { o.http = c }
+}
+
+// WithOpenAIMaxTokens caps how many tokens the model may emit per
+// response. The system prompt asks for short replies, but a model
+// can still misbehave; this is a hard ceiling at the protocol level
+// so a runaway response cannot rack up unbounded cost. Zero (the
+// default) omits the field, leaving OpenAI's own per-model default.
+func WithOpenAIMaxTokens(n int) OpenAIOption {
+	return func(o *OpenAI) { o.maxTokens = n }
 }
 
 // NewOpenAI builds a chat-completions client. apiKey and model are
@@ -94,9 +104,14 @@ func NewOpenAI(apiKey, model string, opts ...OpenAIOption) (*OpenAI, error) {
 // chatRequest mirrors the subset of the OpenAI chat-completions schema
 // we actually use. Adding fields (temperature, max_tokens) means
 // extending this struct — no other layer changes.
+//
+// MaxTokens uses omitempty so the field disappears when zero,
+// preserving the upstream default rather than baking 0 into the wire
+// (which would make every reply empty).
 type chatRequest struct {
-	Model    string        `json:"model"`
-	Messages []chatMessage `json:"messages"`
+	Model     string        `json:"model"`
+	Messages  []chatMessage `json:"messages"`
+	MaxTokens int           `json:"max_tokens,omitempty"`
 }
 
 type chatMessage struct {
@@ -130,7 +145,11 @@ func (o *OpenAI) Reply(ctx context.Context, history []Turn) (string, error) {
 		msgs = append(msgs, chatMessage{Role: t.Role, Content: t.Content})
 	}
 
-	body, err := json.Marshal(chatRequest{Model: o.model, Messages: msgs})
+	body, err := json.Marshal(chatRequest{
+		Model:     o.model,
+		Messages:  msgs,
+		MaxTokens: o.maxTokens,
+	})
 	if err != nil {
 		return "", fmt.Errorf("openai: marshal request: %w", err)
 	}
@@ -198,9 +217,10 @@ func (o *OpenAI) ReplyStream(ctx context.Context, history []Turn, emit func(stri
 	}
 
 	body, err := json.Marshal(streamingChatRequest{
-		Model:    o.model,
-		Messages: msgs,
-		Stream:   true,
+		Model:     o.model,
+		Messages:  msgs,
+		Stream:    true,
+		MaxTokens: o.maxTokens,
 	})
 	if err != nil {
 		return "", fmt.Errorf("openai: marshal request: %w", err)
@@ -280,9 +300,10 @@ func (o *OpenAI) ReplyStream(ctx context.Context, history []Turn, emit func(stri
 // would also work, but using separate types makes the request
 // intent obvious in the call sites.
 type streamingChatRequest struct {
-	Model    string        `json:"model"`
-	Messages []chatMessage `json:"messages"`
-	Stream   bool          `json:"stream"`
+	Model     string        `json:"model"`
+	Messages  []chatMessage `json:"messages"`
+	Stream    bool          `json:"stream"`
+	MaxTokens int           `json:"max_tokens,omitempty"`
 }
 
 // streamingChatChunk decodes the slice of the SSE frame that we use.

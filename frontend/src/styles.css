@@ -1,46 +1,340 @@
-/* Bare-minimum styling — focus is functional smoke-test, not design.
-   Replace once UX direction is set. */
+/*
+ * Mnema — Obsidian-style dark theme.
+ *
+ * Visual reference: Obsidian's default dark palette. Charcoal background
+ * with a single lavender-purple accent for actives/links, no gradients,
+ * subtle dot-grid backdrop. Typography is Inter for body (Obsidian uses
+ * the same family), Space Grotesk for headers, JetBrains Mono for IDs
+ * and role tags. Weights are deliberately spread thin (200) → bold (700)
+ * for hierarchy via weight, not just size.
+ *
+ * All colors live in CSS custom properties at :root so a future light
+ * theme can override the same surface tokens without touching components.
+ */
+
 :root {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  /* Typography */
+  --font-display: 'Space Grotesk', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-body: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Consolas, monospace;
+
+  --weight-thin: 200;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-bold: 700;
+
+  /* Surfaces — Obsidian charcoal palette */
+  --bg-base: #1e1e1e;       /* canvas */
+  --bg-panel: #262626;      /* cards, sidebar */
+  --bg-elevated: #2a2a2a;   /* hover, raised */
+  --bg-input: #1a1a1a;      /* recessed (inputs, textarea) */
+
+  --border-subtle: #363636;
+  --border-strong: #4a4a4a;
+
+  /* Text */
+  --text-primary: #dcddde;
+  --text-secondary: #888888;
+  --text-muted: #6c6c6c;
+  --text-on-accent: #ffffff;
+
+  /* Accent — Obsidian's signature lavender. Used sparingly: active nav
+     link, primary CTA, focus ring, link color. */
+  --accent: #7c6ce0;
+  --accent-hover: #8d7ee8;
+  --accent-soft: rgba(124, 108, 224, 0.12);
+
+  /* Semantic */
+  --error: #e76f6f;
+  --success: #5fbf86;
+
+  /* Motion */
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --duration-fast: 0.15s;
+  --duration-base: 0.4s;
+
+  /* Radii */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+
+  font-family: var(--font-body);
   font-size: 14px;
-  line-height: 1.5;
-  color: #1a1a1a;
-  background: #fafafa;
+  line-height: 1.55;
+  color: var(--text-primary);
+  background: var(--bg-base);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-* { box-sizing: border-box; }
+* {
+  box-sizing: border-box;
+}
 
-body { margin: 0; }
+html, body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg-base);
+  color: var(--text-primary);
+}
 
-main { max-width: 960px; margin: 0 auto; padding: 1.5rem 1rem; }
+/* Subtle dot-grid backdrop. ~20% the strength of a typical grid so it
+   reads as texture, not decoration. Fixed so scrolling doesn't pan it. */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image: radial-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+  background-size: 22px 22px;
+  z-index: 0;
+}
 
-nav { padding: 0.75rem 1rem; border-bottom: 1px solid #e5e5e5; background: #fff; display: flex; gap: 1rem; align-items: center; }
-nav a { color: #1a1a1a; text-decoration: none; }
-nav a.active { font-weight: 600; }
+#root {
+  position: relative;
+  z-index: 1;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ----- Layout primitives ------------------------------------------------ */
+
+main {
+  max-width: 1080px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 2rem 1.25rem;
+  animation: fadeUp var(--duration-base) var(--ease) both;
+}
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  main { animation: none; }
+}
+
+/* ----- Headers ---------------------------------------------------------- */
+
+h1, h2, h3 {
+  font-family: var(--font-display);
+  font-weight: var(--weight-bold);
+  letter-spacing: -0.02em;
+  margin: 0 0 0.75rem;
+  color: var(--text-primary);
+}
+
+h1 { font-size: 1.75rem; }
+h2 { font-size: 1.25rem; }
+h3 { font-size: 1rem; }
+
+p { margin: 0 0 0.75rem; }
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: border-color var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
+}
+a:hover { color: var(--accent-hover); border-bottom-color: var(--accent-hover); }
+
+/* ----- Nav ------------------------------------------------------------- */
+
+nav {
+  padding: 0.6rem 1.5rem;
+  border-bottom: 1px solid var(--border-subtle);
+  background: rgba(38, 38, 38, 0.7);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  display: flex;
+  gap: 1.25rem;
+  align-items: center;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+nav a {
+  color: var(--text-secondary);
+  text-decoration: none;
+  border-bottom: none;
+  padding: 0.25rem 0.5rem;
+  border-radius: var(--radius-sm);
+  font-weight: var(--weight-medium);
+  font-size: 0.9rem;
+  transition: background var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
+}
+nav a:hover {
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+}
+nav a.active {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
 nav .spacer { flex: 1; }
+nav::before {
+  /* Wordmark glyph to the left of the link bar — uses the display font
+     to anchor the brand without a logo asset. */
+  content: '◆ Mnema';
+  font-family: var(--font-display);
+  font-weight: var(--weight-bold);
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+  margin-right: 0.5rem;
+}
 
-button { font: inherit; padding: 0.4rem 0.8rem; cursor: pointer; border: 1px solid #ccc; background: #fff; border-radius: 4px; }
-button:hover:not(:disabled) { background: #f0f0f0; }
-button:disabled { opacity: 0.5; cursor: not-allowed; }
-button.primary { background: #1a1a1a; color: #fff; border-color: #1a1a1a; }
-button.primary:hover:not(:disabled) { background: #333; }
+/* ----- Buttons --------------------------------------------------------- */
 
-input, textarea { font: inherit; padding: 0.4rem 0.6rem; border: 1px solid #ccc; border-radius: 4px; width: 100%; }
-textarea { resize: vertical; min-height: 80px; }
+button {
+  font: inherit;
+  font-family: var(--font-body);
+  font-weight: var(--weight-medium);
+  padding: 0.45rem 0.9rem;
+  cursor: pointer;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-panel);
+  color: var(--text-primary);
+  border-radius: var(--radius-md);
+  transition: background var(--duration-fast) var(--ease),
+              border-color var(--duration-fast) var(--ease),
+              color var(--duration-fast) var(--ease);
+}
+button:hover:not(:disabled) {
+  background: var(--bg-elevated);
+  border-color: var(--border-strong);
+}
+button:disabled { opacity: 0.45; cursor: not-allowed; }
 
-.row { display: flex; gap: 0.5rem; align-items: center; }
-.col { display: flex; flex-direction: column; gap: 0.5rem; }
-.muted { color: #666; }
-.error { color: #b00020; }
-.card { border: 1px solid #e5e5e5; border-radius: 6px; padding: 0.75rem; background: #fff; }
-.card + .card { margin-top: 0.5rem; }
+button.primary {
+  background: var(--accent);
+  color: var(--text-on-accent);
+  border-color: var(--accent);
+}
+button.primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ----- Inputs ---------------------------------------------------------- */
+
+input, textarea {
+  font: inherit;
+  font-family: var(--font-body);
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  width: 100%;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  transition: border-color var(--duration-fast) var(--ease);
+}
+input::placeholder, textarea::placeholder { color: var(--text-muted); }
+input:hover:not(:disabled), textarea:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+input:focus, textarea:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+textarea { resize: vertical; min-height: 88px; }
+
+/* Form label color only — leave display alone so inline labels (e.g.
+   "checkbox + dot + text" in the graph filter strip) keep their natural
+   inline-block layout. Pages that want a stacked field can opt in with
+   the `.field` class. */
+label { color: var(--text-secondary); font-size: 0.85rem; }
+label.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+/* ----- Layout helpers (kept stable; consumers depend on these) -------- */
+
+.row { display: flex; gap: 0.6rem; align-items: center; }
+.col { display: flex; flex-direction: column; gap: 0.6rem; }
+.muted { color: var(--text-secondary); }
+.error { color: var(--error); }
+
+.card {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: 0.95rem 1rem;
+  background: var(--bg-panel);
+}
+.card + .card { margin-top: 0.6rem; }
+
 .list { list-style: none; padding: 0; margin: 0; }
-.list li + li { margin-top: 0.25rem; }
+.list li + li { margin-top: 0.2rem; }
 
-.message { padding: 0.5rem 0.75rem; border-radius: 6px; margin-bottom: 0.5rem; max-width: 80%; }
-.message.user { background: #e8f0ff; margin-left: auto; }
-.message.assistant { background: #f0f0f0; }
-.message.system { background: #fff8e1; font-style: italic; }
-.message .role { font-size: 0.75rem; color: #666; margin-bottom: 0.15rem; }
+/* ----- Chat messages --------------------------------------------------- */
 
-pre { background: #f5f5f5; padding: 0.75rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; }
+.message {
+  padding: 0.6rem 0.85rem;
+  border-radius: var(--radius-lg);
+  margin-bottom: 0.6rem;
+  max-width: 80%;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-panel);
+  animation: fadeUp 0.25s var(--ease) both;
+}
+.message.user {
+  background: var(--accent-soft);
+  border-color: rgba(124, 108, 224, 0.35);
+  margin-left: auto;
+}
+.message.assistant {
+  background: var(--bg-panel);
+}
+.message.system {
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  font-style: italic;
+}
+.message .role {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  margin-bottom: 0.25rem;
+}
+
+/* ----- Code surfaces --------------------------------------------------- */
+
+pre, code {
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+}
+pre {
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  padding: 0.85rem;
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+  color: var(--text-primary);
+}
+
+/* ----- Scrollbars (subtle, always-visible track) ---------------------- */
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }

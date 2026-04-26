@@ -137,7 +137,18 @@ type LLMConfig struct {
 	Provider        LLMProvider `yaml:"provider"`
 	OpenAIAPIKey    string      `yaml:"openai_api_key"`
 	ExtractionModel string      `yaml:"extraction_model"`
-	EmbeddingModel  string      `yaml:"embedding_model"`
+	// ChatModel is the model used for the assistant reply path. Falls
+	// back to ExtractionModel when empty, so existing configs keep
+	// working — but production deployments should set it explicitly so
+	// chat (where latency matters) and extraction (where structured
+	// output matters) can pick different models.
+	ChatModel      string `yaml:"chat_model"`
+	EmbeddingModel string `yaml:"embedding_model"`
+	// ChatMaxTokens caps the assistant's reply length. Default 512 —
+	// enough for the conversational replies the system prompt asks for
+	// (1–3 sentences), small enough that an off-prompt model burst
+	// can't run up the bill. Zero means "use the OpenAI default".
+	ChatMaxTokens int `yaml:"chat_max_tokens"`
 
 	// Recall uses its own provider switch — running the chat path on
 	// OpenAI while recall stays on a local ollama is a supported and

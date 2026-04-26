@@ -121,9 +121,9 @@ export function GraphPage() {
         style={{
           height: '70vh',
           minHeight: 480,
-          border: '1px solid #e5e5e5',
-          borderRadius: 6,
-          background: '#fafafa',
+          border: '1px solid var(--border-subtle)',
+          borderRadius: 'var(--radius-lg)',
+          background: 'var(--bg-input)',
           position: 'relative',
           overflow: 'hidden',
         }}

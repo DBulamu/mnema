@@ -45,6 +45,8 @@ llm:
   provider: openai
   openai_api_key: ${OPENAI_API_KEY}
   extraction_model: gpt-4o-mini
+  chat_model: gpt-4o-mini
+  chat_max_tokens: 512
   embedding_model: text-embedding-3-small
   # Recall in prod stays on stubs until we ship a hosted local LLM
   # (or decide to flip recall to OpenAI). Stub-recall in prod returns

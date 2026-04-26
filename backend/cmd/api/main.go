@@ -178,7 +178,7 @@ func run() error {
 		SearchByVector: recallVectorBridge{repo: nodesRepo},
 		Embed:          embedder,
 	}
-	recall, err := selectRecall(cfg, recallFinder)
+	recall, err := selectRecall(cfg, recallFinder, recallActivator{repo: nodesRepo}, clock.Now)
 	if err != nil {
 		return fmt.Errorf("select recall: %w", err)
 	}
@@ -324,10 +324,26 @@ func selectChatLLM(cfg config.Config) (chatuc.LLMReplier, error) {
 	case config.LLMProviderUnset, config.LLMProviderStub:
 		return chatLLMBridge{provider: llmadapter.NewStub()}, nil
 	case config.LLMProviderOpenAI:
+		// chat_model is the right place for the assistant model;
+		// extraction_model fallback covers existing configs where only
+		// the legacy single-model field was set.
+		model := cfg.LLM.ChatModel
+		if model == "" {
+			model = cfg.LLM.ExtractionModel
+		}
+		// Cap reply length so a misbehaving model can't run up the
+		// bill on a user with no per-tenant quota. 512 ≈ 1.5 short
+		// paragraphs — enough for the system prompt's "1–3 sentences"
+		// rule with comfortable margin.
+		maxTokens := cfg.LLM.ChatMaxTokens
+		if maxTokens <= 0 {
+			maxTokens = 512
+		}
 		client, err := llmadapter.NewOpenAI(
 			cfg.LLM.OpenAIAPIKey,
-			cfg.LLM.ExtractionModel,
+			model,
 			llmadapter.WithOpenAISystemPrompt(chatSystemPrompt),
+			llmadapter.WithOpenAIMaxTokens(maxTokens),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("llm openai: %w", err)
@@ -400,13 +416,20 @@ func selectEmbedder(cfg config.Config) (extractionuc.Embedder, error) {
 // embedding search runs against the user's graph regardless of which
 // LLM produces anchors and answers. That's why finder is a parameter,
 // not branched on provider.
-func selectRecall(cfg config.Config, finder recalluc.CandidateFinder) (*recalluc.Recall, error) {
+func selectRecall(
+	cfg config.Config,
+	finder recalluc.CandidateFinder,
+	activations recalluc.Activator,
+	now func() time.Time,
+) (*recalluc.Recall, error) {
 	switch cfg.LLM.Recall.Provider {
 	case config.LLMProviderUnset, config.LLMProviderStub:
 		return &recalluc.Recall{
-			Anchors:    llmadapter.NewRecallAnchorsStub(),
-			Candidates: finder,
-			Answers:    llmadapter.NewRecallAnswersStub(),
+			Anchors:     llmadapter.NewRecallAnchorsStub(),
+			Candidates:  finder,
+			Answers:     llmadapter.NewRecallAnswersStub(),
+			Activations: activations,
+			Clock:       now,
 		}, nil
 	case config.LLMProviderOllama:
 		model := strings.TrimSpace(cfg.LLM.Recall.OllamaModel)
@@ -433,15 +456,19 @@ func selectRecall(cfg config.Config, finder recalluc.CandidateFinder) (*recalluc
 			Candidates:    finder,
 			Answers:       answers,
 			AnswersStream: answers,
+			Activations:   activations,
+			Clock:         now,
 		}, nil
 	case config.LLMProviderOpenAI:
 		// OpenAI-backed recall is on the roadmap but not wired yet —
 		// leave it on stubs so a misconfigured deploy serves an honest
 		// "model not connected" answer instead of erroring out.
 		return &recalluc.Recall{
-			Anchors:    llmadapter.NewRecallAnchorsStub(),
-			Candidates: finder,
-			Answers:    llmadapter.NewRecallAnswersStub(),
+			Anchors:     llmadapter.NewRecallAnchorsStub(),
+			Candidates:  finder,
+			Answers:     llmadapter.NewRecallAnswersStub(),
+			Activations: activations,
+			Clock:       now,
 		}, nil
 	default:
 		return nil, fmt.Errorf("unknown recall provider %q", cfg.LLM.Recall.Provider)
@@ -546,6 +573,19 @@ func (b recallVectorBridge) SearchByVector(ctx context.Context, userID string, v
 		Vector: vector,
 		Limit:  limit,
 	})
+}
+
+// recallActivator wraps the postgres nodes repo as a recall.Activator —
+// the orchestrator bumps activation/last_accessed_at on referenced
+// nodes after a successful recall. The shapes already line up; the
+// bridge is structural-typing glue so neither package imports the
+// other.
+type recallActivator struct {
+	repo *pgnodes.Repo
+}
+
+func (b recallActivator) BumpActivation(ctx context.Context, userID string, ids []string, delta float32, now time.Time) error {
+	return b.repo.BumpActivation(ctx, userID, ids, delta, now)
 }
 
 // messageExtractorBridge satisfies chatuc.MessageExtractor by running

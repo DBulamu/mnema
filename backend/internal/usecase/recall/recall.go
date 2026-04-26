@@ -21,10 +21,26 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/DBulamu/mnema/backend/internal/domain"
 )
+
+// DecayRatePerDay is the daily decay coefficient λ used everywhere
+// activation enters a ranking expression. Half-life ≈ ln(2)/λ ≈ 21 days
+// at λ=1/30. Defined here so the usecase, the SQL ORDER BY, and any
+// future analytics agree on one constant.
+//
+// We pick 30-day τ (1-month half-life~21d) because that aligns with
+// H11's "monthly resurfacing ritual" — a node not touched in a month
+// drops below the freshly-revived ones, but does not vanish.
+const DecayRatePerDay = 1.0 / 30.0
+
+// activationDelta is how much a referenced node's activation rises per
+// recall. Capped at 1.0 by the adapter; multiple revivals are needed to
+// fully re-saturate.
+const activationDelta = 0.5
 
 // Default and max language codes. The MVP only ships Russian; the
 // field is on the wire so the contract does not change when we add
@@ -128,6 +144,15 @@ type AnswerDraft struct {
 	Spans  []Span
 }
 
+// Activator bumps activation and last_accessed_at on the listed nodes.
+// Optional — when nil, recall is read-only (useful for tests). The
+// adapter is expected to scope by user_id and silently ignore unknown
+// or soft-deleted nodes; an error from this port is non-fatal for the
+// recall response, the orchestrator only logs it.
+type Activator interface {
+	BumpActivation(ctx context.Context, userID string, ids []string, delta float32, now time.Time) error
+}
+
 // Recall is the orchestrator. Each port is required; nil ports cause
 // run-time errors rather than a silent half-pipeline.
 //
@@ -135,11 +160,18 @@ type AnswerDraft struct {
 // AnswerGenerator and emits one synthetic delta carrying the full
 // answer. That keeps the SSE contract uniform for clients regardless of
 // which provider is wired (stub, ollama, future openai).
+//
+// Activations is optional: when set, every successful recall bumps the
+// activation of each referenced node — closing the loop on H11 (the
+// memory the user just asked about is the freshest one). Failures are
+// swallowed, see bumpReferenced.
 type Recall struct {
 	Anchors       AnchorExtractor
 	Candidates    CandidateFinder
 	Answers       AnswerGenerator
 	AnswersStream AnswerStreamGenerator
+	Activations   Activator
+	Clock         func() time.Time
 }
 
 // StreamEvent is the union type RunStream pushes to the transport
@@ -232,12 +264,39 @@ func (uc *Recall) Run(ctx context.Context, in Input) (Output, error) {
 	answer, spans := validateDraft(draft, candidates)
 	nodes := selectReferencedNodes(candidates, spans)
 
+	uc.bumpReferenced(ctx, in.UserID, nodes)
+
 	return Output{
 		Answer: answer,
 		Spans:  spans,
 		Nodes:  nodes,
 		Lang:   lang,
 	}, nil
+}
+
+// bumpReferenced re-activates every node that ended up in the final
+// answer. Errors are swallowed: the user already got their answer, and
+// re-running the whole recall just because revival accounting failed
+// would punish the wrong action. Adapter-side observability covers the
+// silent-failure case.
+func (uc *Recall) bumpReferenced(ctx context.Context, userID string, nodes []domain.Node) {
+	if uc.Activations == nil || len(nodes) == 0 {
+		return
+	}
+	ids := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		if n.ID != "" {
+			ids = append(ids, n.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	now := time.Now().UTC()
+	if uc.Clock != nil {
+		now = uc.Clock()
+	}
+	_ = uc.Activations.BumpActivation(ctx, userID, ids, activationDelta, now)
 }
 
 // RunStream is the streaming variant of Run. The pipeline is
@@ -322,6 +381,8 @@ func (uc *Recall) RunStream(ctx context.Context, in Input, emit func(StreamEvent
 
 	answer, spans := validateDraft(draft, candidates)
 	nodes := selectReferencedNodes(candidates, spans)
+
+	uc.bumpReferenced(ctx, in.UserID, nodes)
 
 	return emit(StreamEvent{Final: &FinalEvent{
 		Answer: answer,

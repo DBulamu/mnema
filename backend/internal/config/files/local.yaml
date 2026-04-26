@@ -50,6 +50,12 @@ llm:
   provider: stub
   openai_api_key: ${OPENAI_API_KEY}
   extraction_model: gpt-4o-mini
+  # chat_model is what /v1/conversations/.../messages uses. Falls back
+  # to extraction_model if empty, so existing configs keep working.
+  chat_model: gpt-4o-mini
+  # Hard ceiling on assistant reply length so a runaway response can't
+  # rack up unbounded cost. System prompt asks for 1–3 sentences.
+  chat_max_tokens: 512
   embedding_model: text-embedding-3-small
   # Recall pipeline uses its own provider switch — running chat on
   # stub/openai while recall stays on a local ollama is supported.

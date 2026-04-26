@@ -26,7 +26,8 @@ func toHTTP(err error) error {
 		errors.Is(err, domain.ErrTokenInvalid):
 		return huma.Error401Unauthorized("unauthorized")
 	case errors.Is(err, domain.ErrUserNotFound),
-		errors.Is(err, domain.ErrConversationNotFound):
+		errors.Is(err, domain.ErrConversationNotFound),
+		errors.Is(err, domain.ErrNodeNotFound):
 		return huma.Error404NotFound("not found")
 	default:
 		return huma.Error500InternalServerError("internal error")

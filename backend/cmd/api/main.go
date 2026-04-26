@@ -25,19 +25,24 @@ import (
 	jwtadapter "github.com/DBulamu/mnema/backend/internal/adapter/jwt"
 	llmadapter "github.com/DBulamu/mnema/backend/internal/adapter/llm"
 	pgconversations "github.com/DBulamu/mnema/backend/internal/adapter/postgres/conversations"
+	pgedges "github.com/DBulamu/mnema/backend/internal/adapter/postgres/edges"
 	pgmagiclinks "github.com/DBulamu/mnema/backend/internal/adapter/postgres/magiclinks"
 	pgmessages "github.com/DBulamu/mnema/backend/internal/adapter/postgres/messages"
+	pgnodes "github.com/DBulamu/mnema/backend/internal/adapter/postgres/nodes"
 	pgsessions "github.com/DBulamu/mnema/backend/internal/adapter/postgres/sessions"
 	pgusers "github.com/DBulamu/mnema/backend/internal/adapter/postgres/users"
 	"github.com/DBulamu/mnema/backend/internal/adapter/system"
 	"github.com/DBulamu/mnema/backend/internal/config"
 	"github.com/DBulamu/mnema/backend/internal/db"
+	"github.com/DBulamu/mnema/backend/internal/domain"
 	"github.com/DBulamu/mnema/backend/internal/logger"
 	"github.com/DBulamu/mnema/backend/internal/migrations"
 	"github.com/DBulamu/mnema/backend/internal/transport/rest"
 	authuc "github.com/DBulamu/mnema/backend/internal/usecase/auth"
 	chatuc "github.com/DBulamu/mnema/backend/internal/usecase/chat"
+	extractionuc "github.com/DBulamu/mnema/backend/internal/usecase/extraction"
 	profileuc "github.com/DBulamu/mnema/backend/internal/usecase/profile"
+	"github.com/rs/zerolog"
 )
 
 func main() {
@@ -81,11 +86,27 @@ func run() error {
 	magicLinksRepo := pgmagiclinks.New(pool)
 	conversationsRepo := pgconversations.New(pool)
 	messagesRepo := pgmessages.New(pool)
+	nodesRepo := pgnodes.New(pool)
+	edgesRepo := pgedges.New(pool)
 
 	mailer := selectMailer(cfg)
 	chatLLM, err := selectChatLLM(cfg)
 	if err != nil {
 		return fmt.Errorf("select chat llm: %w", err)
+	}
+	extractorLLM, err := selectExtractor(cfg)
+	if err != nil {
+		return fmt.Errorf("select extractor: %w", err)
+	}
+
+	extract := &extractionuc.Extract{
+		Extractor: extractorLLM,
+		Nodes:     nodesBridge{repo: nodesRepo},
+		Edges:     edgesBridge{repo: edgesRepo},
+	}
+	extractorBridge := messageExtractorBridge{
+		extract: extract,
+		log:     log.With().Str("component", "extractor").Logger(),
 	}
 
 	// --- Usecases (composed from adapters). --------------------------
@@ -128,6 +149,7 @@ func run() error {
 		History:       messagesRepo,
 		Toucher:       conversationsRepo,
 		LLM:           chatLLM,
+		Extractor:     extractorBridge,
 		Clock:         clock,
 	}
 
@@ -220,15 +242,15 @@ func (b chatLLMBridge) Reply(ctx context.Context, history []chatuc.Turn) (string
 }
 
 // selectChatLLM picks the LLM adapter based on config.LLM.Provider.
-// "stub" is always available and deterministic — useful in local and
-// test. "openai" requires OPENAI_API_KEY and hits the real API; we
-// fail at startup if the key is missing, so a misconfigured deploy
-// never silently falls back to the stub.
+// Stub is always available and deterministic — useful in local and
+// test. OpenAI requires OPENAI_API_KEY and hits the real API; we fail
+// at startup if the key is missing, so a misconfigured deploy never
+// silently falls back to the stub.
 func selectChatLLM(cfg config.Config) (chatuc.LLMReplier, error) {
 	switch cfg.LLM.Provider {
-	case "", "stub":
+	case config.LLMProviderUnset, config.LLMProviderStub:
 		return chatLLMBridge{provider: llmadapter.NewStub()}, nil
-	case "openai":
+	case config.LLMProviderOpenAI:
 		client, err := llmadapter.NewOpenAI(
 			cfg.LLM.OpenAIAPIKey,
 			cfg.LLM.ExtractionModel,
@@ -256,4 +278,89 @@ func selectMailer(cfg config.Config) mailer {
 		return emailadapter.NewCaptor()
 	}
 	return emailadapter.NewSMTPSender(cfg.SMTP.Host, cfg.SMTP.Port, cfg.SMTP.From)
+}
+
+// selectExtractor picks the extractor adapter the same way as
+// selectChatLLM. Both sides of the LLM workload (chat reply +
+// extraction) follow cfg.LLM.Provider so an environment is either
+// "fully stubbed" or "fully OpenAI" — we don't currently mix.
+func selectExtractor(cfg config.Config) (extractionuc.Extractor, error) {
+	switch cfg.LLM.Provider {
+	case config.LLMProviderUnset, config.LLMProviderStub:
+		return llmadapter.NewExtractorStub(), nil
+	case config.LLMProviderOpenAI:
+		client, err := llmadapter.NewExtractorOpenAI(cfg.LLM.OpenAIAPIKey, cfg.LLM.ExtractionModel)
+		if err != nil {
+			return nil, fmt.Errorf("extractor openai: %w", err)
+		}
+		return client, nil
+	default:
+		return nil, fmt.Errorf("unknown llm provider %q", cfg.LLM.Provider)
+	}
+}
+
+// nodesBridge adapts the postgres nodes Repo to the consumer-side port
+// declared by extraction. The two CreateParams structs are structurally
+// identical but nominally distinct (Go is nominal), so we copy field
+// for field. Same pattern as chatLLMBridge.
+type nodesBridge struct {
+	repo *pgnodes.Repo
+}
+
+func (b nodesBridge) Create(ctx context.Context, p extractionuc.NodeCreateParams) (domain.Node, error) {
+	return b.repo.Create(ctx, pgnodes.CreateParams{
+		UserID:              p.UserID,
+		Type:                p.Type,
+		Title:               p.Title,
+		Content:             p.Content,
+		Metadata:            p.Metadata,
+		OccurredAt:          p.OccurredAt,
+		OccurredAtPrecision: p.OccurredAtPrecision,
+		SourceMessageID:     p.SourceMessageID,
+	})
+}
+
+// edgesBridge mirrors nodesBridge for the edges adapter.
+type edgesBridge struct {
+	repo *pgedges.Repo
+}
+
+func (b edgesBridge) Create(ctx context.Context, p extractionuc.EdgeCreateParams) (domain.Edge, error) {
+	return b.repo.Create(ctx, pgedges.CreateParams{
+		UserID:   p.UserID,
+		SourceID: p.SourceID,
+		TargetID: p.TargetID,
+		Type:     p.Type,
+	})
+}
+
+// messageExtractorBridge satisfies chatuc.MessageExtractor by running
+// the extraction usecase and swallowing errors into the log. The
+// non-fatal contract lives here, not in the usecase — the chat path
+// stays simple and a broken extractor never blocks chat.
+type messageExtractorBridge struct {
+	extract *extractionuc.Extract
+	log     zerolog.Logger
+}
+
+func (b messageExtractorBridge) ExtractFromMessage(ctx context.Context, userID, messageID, content string) {
+	out, err := b.extract.Run(ctx, extractionuc.ExtractInput{
+		UserID:    userID,
+		MessageID: messageID,
+		Content:   content,
+	})
+	if err != nil {
+		b.log.Warn().
+			Err(err).
+			Str("user_id", userID).
+			Str("message_id", messageID).
+			Msg("extraction failed")
+		return
+	}
+	b.log.Debug().
+		Str("user_id", userID).
+		Str("message_id", messageID).
+		Int("nodes", len(out.NodeIDs)).
+		Int("edges", len(out.EdgeIDs)).
+		Msg("extraction stored")
 }

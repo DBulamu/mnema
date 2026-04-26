@@ -11,6 +11,8 @@ import (
 	"context"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/DBulamu/mnema/backend/internal/domain"
 )
 
 // Turn is a single message visible to the model. Identical in shape to
@@ -47,7 +49,7 @@ func (s *Stub) Reply(_ context.Context, history []Turn) (string, error) {
 // is present — this is defensive, not load-bearing.
 func lastUserContent(history []Turn) string {
 	for i := len(history) - 1; i >= 0; i-- {
-		if history[i].Role == "user" {
+		if history[i].Role == string(domain.RoleUser) {
 			return strings.TrimSpace(history[i].Content)
 		}
 	}

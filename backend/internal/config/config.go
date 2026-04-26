@@ -104,20 +104,54 @@ type S3Config struct {
 	UsePathStyle bool   `yaml:"use_path_style"`
 }
 
-type LLMConfig struct {
-	Provider        string `yaml:"provider"`
-	OpenAIAPIKey    string `yaml:"openai_api_key"`
-	ExtractionModel string `yaml:"extraction_model"`
-	EmbeddingModel  string `yaml:"embedding_model"`
+// LLMProvider names a backing LLM implementation. Closed list — adding
+// a provider is a code change (new const + selectChatLLM case + adapter).
+type LLMProvider string
+
+const (
+	// LLMProviderUnset is the zero value; callers treat it the same as
+	// LLMProviderStub so an empty config still boots in local/test.
+	LLMProviderUnset LLMProvider = ""
+	// LLMProviderStub is the deterministic, dependency-free reply
+	// generator. Default in local and test.
+	LLMProviderStub LLMProvider = "stub"
+	// LLMProviderOpenAI is the public OpenAI chat-completions API
+	// (also used for OpenAI-compatible endpoints via WithOpenAIBaseURL).
+	LLMProviderOpenAI LLMProvider = "openai"
+)
+
+func (p LLMProvider) Valid() bool {
+	switch p {
+	case LLMProviderUnset, LLMProviderStub, LLMProviderOpenAI:
+		return true
+	}
+	return false
 }
+
+type LLMConfig struct {
+	Provider        LLMProvider `yaml:"provider"`
+	OpenAIAPIKey    string      `yaml:"openai_api_key"`
+	ExtractionModel string      `yaml:"extraction_model"`
+	EmbeddingModel  string      `yaml:"embedding_model"`
+}
+
+// envVarName is the OS environment variable that selects which YAML
+// file to load. Kept here so callers don't sprinkle "APP_ENV" string
+// literals through the codebase.
+const envVarName = "APP_ENV"
+
+// jwtSecretPlaceholder is the literal we ship in local.yaml / test.yaml
+// and refuse to accept in prod. Centralising the magic value is the
+// only way the validate() check stays in sync with the YAML files.
+const jwtSecretPlaceholder = "change-me-locally"
 
 // Load reads config/<APP_ENV>.yaml from the embedded FS, expands
 // ${ENV_VAR} placeholders against the process environment, and
 // validates the result.
 func Load() (Config, error) {
-	envName := strings.TrimSpace(os.Getenv("APP_ENV"))
+	envName := strings.TrimSpace(os.Getenv(envVarName))
 	if envName == "" {
-		envName = "local"
+		envName = string(EnvLocal)
 	}
 	env := Env(envName)
 	if !env.Valid() {
@@ -167,11 +201,14 @@ func (c Config) validate() error {
 	if c.JWT.Secret == "" {
 		return fmt.Errorf("jwt.secret is required (APP_ENV=%s)", c.Env)
 	}
+	if !c.LLM.Provider.Valid() {
+		return fmt.Errorf("invalid llm.provider %q (want: stub|openai)", c.LLM.Provider)
+	}
 	if c.Env == EnvProd {
-		if c.JWT.Secret == "change-me-locally" {
+		if c.JWT.Secret == jwtSecretPlaceholder {
 			return fmt.Errorf("jwt.secret must be set to a real value in prod")
 		}
-		if c.LLM.Provider == "openai" && c.LLM.OpenAIAPIKey == "" {
+		if c.LLM.Provider == LLMProviderOpenAI && c.LLM.OpenAIAPIKey == "" {
 			return fmt.Errorf("llm.openai_api_key is required when llm.provider=openai")
 		}
 	}

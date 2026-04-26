@@ -10,7 +10,26 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/DBulamu/mnema/backend/internal/domain"
 )
+
+// openaiDefaultBaseURL is the public OpenAI v1 root. Overridable via
+// WithOpenAIBaseURL for OpenAI-compatible endpoints (OpenRouter, Azure,
+// self-hosted vLLM).
+const openaiDefaultBaseURL = "https://api.openai.com/v1"
+
+// openaiDefaultTimeout caps a single LLM call. LLMs are slow but we
+// still need a ceiling so a stuck request doesn't pin a goroutine
+// forever — the chat path is sync, so this is also the user's wait.
+const openaiDefaultTimeout = 60 * time.Second
+
+// openaiChatCompletionsPath is the chat endpoint relative to baseURL.
+const openaiChatCompletionsPath = "/chat/completions"
+
+// openaiErrorBodyLogLimit truncates upstream error bodies in our error
+// strings — enough to debug, short enough to not flood logs.
+const openaiErrorBodyLogLimit = 500
 
 // OpenAI is a chat-completions adapter. It speaks the public OpenAI
 // HTTP protocol directly via net/http — no SDK — to keep dependencies
@@ -62,8 +81,8 @@ func NewOpenAI(apiKey, model string, opts ...OpenAIOption) (*OpenAI, error) {
 	o := &OpenAI{
 		apiKey:  apiKey,
 		model:   model,
-		baseURL: "https://api.openai.com/v1",
-		http:    &http.Client{Timeout: 60 * time.Second},
+		baseURL: openaiDefaultBaseURL,
+		http:    &http.Client{Timeout: openaiDefaultTimeout},
 	}
 	for _, opt := range opts {
 		opt(o)
@@ -104,7 +123,7 @@ type chatResponse struct {
 func (o *OpenAI) Reply(ctx context.Context, history []Turn) (string, error) {
 	msgs := make([]chatMessage, 0, len(history)+1)
 	if o.system != "" {
-		msgs = append(msgs, chatMessage{Role: "system", Content: o.system})
+		msgs = append(msgs, chatMessage{Role: string(domain.RoleSystem), Content: o.system})
 	}
 	for _, t := range history {
 		msgs = append(msgs, chatMessage{Role: t.Role, Content: t.Content})
@@ -117,7 +136,7 @@ func (o *OpenAI) Reply(ctx context.Context, history []Turn) (string, error) {
 
 	req, err := http.NewRequestWithContext(
 		ctx, http.MethodPost,
-		o.baseURL+"/chat/completions",
+		o.baseURL+openaiChatCompletionsPath,
 		bytes.NewReader(body),
 	)
 	if err != nil {
@@ -144,7 +163,7 @@ func (o *OpenAI) Reply(ctx context.Context, history []Turn) (string, error) {
 		if jsonErr := json.Unmarshal(raw, &parsed); jsonErr == nil && parsed.Error != nil {
 			return "", fmt.Errorf("openai: %d %s: %s", resp.StatusCode, parsed.Error.Type, parsed.Error.Message)
 		}
-		return "", fmt.Errorf("openai: %d: %s", resp.StatusCode, truncateForError(string(raw), 500))
+		return "", fmt.Errorf("openai: %d: %s", resp.StatusCode, truncateForError(string(raw), openaiErrorBodyLogLimit))
 	}
 
 	var parsed chatResponse

@@ -35,4 +35,10 @@ var (
 	// ErrInvalidArgument is for caller-side validation failures (empty
 	// email, malformed input). Transport maps it to 400.
 	ErrInvalidArgument = errors.New("invalid argument")
+
+	// ErrNodeNotFound is returned when a node lookup misses, the node
+	// is soft-deleted, or the node belongs to a different user. Like
+	// ErrConversationNotFound the cases are collapsed deliberately to
+	// avoid leaking existence.
+	ErrNodeNotFound = errors.New("node not found")
 )

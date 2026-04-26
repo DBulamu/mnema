@@ -38,6 +38,15 @@ type LLMReplier interface {
 	Reply(ctx context.Context, history []Turn) (string, error)
 }
 
+// MessageExtractor turns a stored user message into graph entities. By
+// contract this is non-fatal: it has no error return so the chat path
+// stays simple — the bridge implementation in the composition root logs
+// failures and swallows them. We pay this in lost graph nodes if
+// extraction breaks, never in lost chat messages.
+type MessageExtractor interface {
+	ExtractFromMessage(ctx context.Context, userID, messageID, content string)
+}
+
 // clock returns the wall clock; pinned in tests via the system port.
 type clock interface {
 	Now() time.Time
@@ -70,6 +79,7 @@ type SendMessage struct {
 	History       messagesLister
 	Toucher       conversationToucher
 	LLM           LLMReplier
+	Extractor     MessageExtractor
 	Clock         clock
 }
 
@@ -111,6 +121,15 @@ func (uc *SendMessage) Run(ctx context.Context, in SendMessageInput) (SendMessag
 	userMsg, err := uc.Messages.Append(ctx, in.ConversationID, domain.RoleUser, content)
 	if err != nil {
 		return SendMessageOutput{}, fmt.Errorf("append user message: %w", err)
+	}
+
+	// Extraction runs against the stored user message. The port is
+	// non-fatal by contract — bridge implementations log internally — so
+	// we don't gate the chat reply on it. Skipping when nil keeps the
+	// usecase usable in tests and in environments where extraction is
+	// intentionally disabled.
+	if uc.Extractor != nil {
+		uc.Extractor.ExtractFromMessage(ctx, in.UserID, userMsg.ID, userMsg.Content)
 	}
 
 	history := buildLLMHistory(prior, userMsg)

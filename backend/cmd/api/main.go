@@ -43,6 +43,7 @@ import (
 	extractionuc "github.com/DBulamu/mnema/backend/internal/usecase/extraction"
 	graphuc "github.com/DBulamu/mnema/backend/internal/usecase/graph"
 	profileuc "github.com/DBulamu/mnema/backend/internal/usecase/profile"
+	recalluc "github.com/DBulamu/mnema/backend/internal/usecase/recall"
 	"github.com/rs/zerolog"
 )
 
@@ -169,6 +170,11 @@ func run() error {
 		Embedder: embedder,
 	}
 
+	recall, err := selectRecall(cfg)
+	if err != nil {
+		return fmt.Errorf("select recall: %w", err)
+	}
+
 	// --- Transport (handlers + middleware). --------------------------
 	api, mux := rest.NewAPI(
 		"Mnema API",
@@ -195,6 +201,7 @@ func run() error {
 	rest.RegisterSendMessage(api, sendMessage)
 	rest.RegisterGetGraph(api, getGraph)
 	rest.RegisterSearchGraph(api, searchGraph)
+	rest.RegisterRecall(api, recall)
 
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.HTTPPort),
@@ -332,6 +339,25 @@ func selectEmbedder(cfg config.Config) (extractionuc.Embedder, error) {
 			return nil, fmt.Errorf("embedder openai: %w", err)
 		}
 		return client, nil
+	default:
+		return nil, fmt.Errorf("unknown llm provider %q", cfg.LLM.Provider)
+	}
+}
+
+// selectRecall builds the recall pipeline. Today every provider lands
+// on the stub triplet — the LLM-driven anchor extractor, candidate
+// finder, and answer generator are scheduled in Phase 4.5 of the
+// roadmap. Branching on cfg.LLM.Provider already, so the OpenAI/local
+// LLM wiring will only need to flip the cases below without touching
+// the call site.
+func selectRecall(cfg config.Config) (*recalluc.Recall, error) {
+	switch cfg.LLM.Provider {
+	case config.LLMProviderUnset, config.LLMProviderStub, config.LLMProviderOpenAI:
+		return &recalluc.Recall{
+			Anchors:    llmadapter.NewRecallAnchorsStub(),
+			Candidates: llmadapter.NewRecallCandidatesStub(),
+			Answers:    llmadapter.NewRecallAnswersStub(),
+		}, nil
 	default:
 		return nil, fmt.Errorf("unknown llm provider %q", cfg.LLM.Provider)
 	}

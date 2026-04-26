@@ -732,6 +732,69 @@ paths:
                     items:
                       $ref: '#/components/schemas/Node'
 
+  # ---------- RECALL (вспомнить из графа) ----------
+
+  /recall:
+    post:
+      tags: [recall]
+      summary: |
+        Свободный текстовый запрос → ответ с привязкой подстрок к узлам графа.
+        Подробности и контракт: wiki/recall-mechanics.md.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text:
+                  type: string
+                  minLength: 1
+                  maxLength: 2000
+                lang:
+                  type: string
+                  maxLength: 16
+                  description: BCP-47 / двухбуквенный код. Default `ru`.
+      responses:
+        '200':
+          description: Ответ с подсветкой
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [answer, spans, nodes, lang]
+                properties:
+                  answer:
+                    type: string
+                  spans:
+                    type: array
+                    items:
+                      type: object
+                      required: [start, end, node_ids]
+                      properties:
+                        start:
+                          type: integer
+                          minimum: 0
+                          description: Rune-offset (включительно).
+                        end:
+                          type: integer
+                          minimum: 0
+                          description: Rune-offset (исключительно).
+                        node_ids:
+                          type: array
+                          items:
+                            type: string
+                            format: uuid
+                  nodes:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Node'
+                  lang:
+                    type: string
+
   # ---------- NODES (CRUD для UI) ----------
 
   /nodes/{node_id}:

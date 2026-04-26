@@ -619,45 +619,46 @@ paths:
     get:
       tags: [graph]
       summary: Получить граф для визуализации (timeline-граф H16)
+      description: |
+        Возвращает окно узлов пользователя плюс рёбра, **оба конца которых**
+        попадают в это окно (висячие рёбра не отдаются — UI их всё равно
+        не рендерит). Soft-deleted узлы исключаются.
+
+        MVP: фильтры `type` (повторяемый) и `since`. `from/to/min_activation`
+        и курсорная пагинация — отложены до Фазы 5/6.
+      security:
+        - BearerAuth: []
       parameters:
         - in: query
-          name: from
-          schema:
-            type: string
-            format: date-time
-          description: Начало временного окна
-        - in: query
-          name: to
-          schema:
-            type: string
-            format: date-time
-        - in: query
-          name: types
+          name: type
           schema:
             type: array
             items:
               $ref: '#/components/schemas/NodeType'
-          description: Фильтр по типам узлов
+          style: form
+          explode: false
+          description: 'Фильтр по типам узлов. CSV: `?type=person,event`.'
         - in: query
-          name: min_activation
+          name: since
           schema:
-            type: number
-            format: float
-            default: 0
-          description: Минимальный activation (0=включая затухшие, 0.2=только активные)
+            type: string
+            format: date-time
+          description: Нижняя граница `created_at` (RFC3339)
         - in: query
           name: limit
           schema:
             type: integer
-            default: 500
-            maximum: 5000
+            default: 200
+            minimum: 1
+            maximum: 1000
       responses:
         '200':
-          description: Узлы и связи
+          description: Узлы и рёбра окна
           content:
             application/json:
               schema:
                 type: object
+                required: [nodes, edges]
                 properties:
                   nodes:
                     type: array
@@ -667,8 +668,6 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/Edge'
-                  has_more:
-                    type: boolean
 
   /graph/search:
     get:

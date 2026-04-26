@@ -41,6 +41,7 @@ import (
 	authuc "github.com/DBulamu/mnema/backend/internal/usecase/auth"
 	chatuc "github.com/DBulamu/mnema/backend/internal/usecase/chat"
 	extractionuc "github.com/DBulamu/mnema/backend/internal/usecase/extraction"
+	graphuc "github.com/DBulamu/mnema/backend/internal/usecase/graph"
 	profileuc "github.com/DBulamu/mnema/backend/internal/usecase/profile"
 	"github.com/rs/zerolog"
 )
@@ -159,6 +160,11 @@ func run() error {
 		Clock:         clock,
 	}
 
+	getGraph := &graphuc.GetGraph{
+		Nodes: graphNodesBridge{repo: nodesRepo},
+		Edges: edgesRepo,
+	}
+
 	// --- Transport (handlers + middleware). --------------------------
 	api, mux := rest.NewAPI(
 		"Mnema API",
@@ -183,6 +189,7 @@ func run() error {
 	rest.RegisterListConversations(api, listConversations)
 	rest.RegisterGetConversation(api, getConversation)
 	rest.RegisterSendMessage(api, sendMessage)
+	rest.RegisterGetGraph(api, getGraph)
 
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.HTTPPort),
@@ -357,6 +364,23 @@ func (b edgesBridge) Create(ctx context.Context, p extractionuc.EdgeCreateParams
 		SourceID: p.SourceID,
 		TargetID: p.TargetID,
 		Type:     p.Type,
+	})
+}
+
+// graphNodesBridge bridges graphuc.NodeListParams (consumer-side) to the
+// adapter's pgnodes.ListForGraphParams. The two structs are field-for-
+// field identical, but Go nominal typing treats them as distinct — so
+// we copy. Same pattern as nodesBridge / edgesBridge.
+type graphNodesBridge struct {
+	repo *pgnodes.Repo
+}
+
+func (b graphNodesBridge) ListForGraph(ctx context.Context, p graphuc.NodeListParams) ([]domain.Node, error) {
+	return b.repo.ListForGraph(ctx, pgnodes.ListForGraphParams{
+		UserID: p.UserID,
+		Types:  p.Types,
+		Since:  p.Since,
+		Limit:  p.Limit,
 	})
 }
 

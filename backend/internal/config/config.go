@@ -208,8 +208,16 @@ func (c Config) validate() error {
 		if c.JWT.Secret == jwtSecretPlaceholder {
 			return fmt.Errorf("jwt.secret must be set to a real value in prod")
 		}
-		if c.LLM.Provider == LLMProviderOpenAI && c.LLM.OpenAIAPIKey == "" {
-			return fmt.Errorf("llm.openai_api_key is required when llm.provider=openai")
+		if c.LLM.Provider == LLMProviderOpenAI {
+			if c.LLM.OpenAIAPIKey == "" {
+				return fmt.Errorf("llm.openai_api_key is required when llm.provider=openai")
+			}
+			if c.LLM.ExtractionModel == "" {
+				return fmt.Errorf("llm.extraction_model is required when llm.provider=openai")
+			}
+			if c.LLM.EmbeddingModel == "" {
+				return fmt.Errorf("llm.embedding_model is required when llm.provider=openai")
+			}
 		}
 	}
 	return nil

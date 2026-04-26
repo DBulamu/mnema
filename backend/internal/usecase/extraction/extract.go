@@ -10,7 +10,9 @@
 // MVP shape:
 //   - sync invocation from chat.SendMessage (errors are logged, not fatal);
 //   - one extraction per user message, no batching;
-//   - no embedding generation here — that lands in a follow-up step.
+//   - per-node embedding generation runs as a second step against the
+//     just-stored node — failures are non-fatal so a flaky embedding
+//     provider never costs us the node itself.
 package extraction
 
 import (
@@ -94,6 +96,22 @@ type EdgeCreateParams struct {
 	Type     string
 }
 
+// Embedder turns a piece of text into a fixed-size vector for the H11
+// revival path. The Model() string is stored alongside the vector on the
+// node so we can detect dimension changes and trigger a re-embed when we
+// swap providers — vectors with different dimensions cannot be compared.
+type Embedder interface {
+	Embed(ctx context.Context, text string) ([]float32, error)
+	Model() string
+}
+
+// embeddingUpdater attaches a freshly-generated vector to an existing
+// node. Split from Create so a failed embedding does not poison node
+// persistence — extraction first writes the node, then tries to embed.
+type embeddingUpdater interface {
+	UpdateEmbedding(ctx context.Context, nodeID string, vec []float32, model string) error
+}
+
 // Extract is the usecase: take a freshly-stored user message, ask the
 // LLM what graph entities it implies, persist them.
 //
@@ -111,6 +129,12 @@ type Extract struct {
 	Extractor Extractor
 	Nodes     nodeCreator
 	Edges     edgeCreator
+	// Embedder and Embeddings are optional. When either is nil the
+	// extraction usecase persists nodes and edges as before but skips
+	// embedding generation — this keeps test wiring trivial and lets a
+	// deploy turn embeddings off without touching the chat hot path.
+	Embedder   Embedder
+	Embeddings embeddingUpdater
 }
 
 type ExtractInput struct {
@@ -122,6 +146,13 @@ type ExtractInput struct {
 type ExtractOutput struct {
 	NodeIDs []string
 	EdgeIDs []string
+	// Embedded counts how many of NodeIDs received a vector successfully.
+	// EmbedFailures is the number of nodes whose vector generation or
+	// persistence failed — exposed (not surfaced as an error) because
+	// embedding is non-fatal by design and we still want the count for
+	// observability at the call site.
+	Embedded      int
+	EmbedFailures int
 }
 
 func (uc *Extract) Run(ctx context.Context, in ExtractInput) (ExtractOutput, error) {
@@ -182,6 +213,19 @@ func (uc *Extract) Run(ctx context.Context, in ExtractInput) (ExtractOutput, err
 		if en.LocalID != "" {
 			idMap[en.LocalID] = node.ID
 		}
+
+		// Per-node embedding. Errors are deliberately swallowed into a
+		// counter: we'd rather store a node without a vector than lose
+		// the node because the embedding API is rate-limited or down.
+		// A backfill job (not yet implemented) can revisit nodes whose
+		// embedding is NULL.
+		if uc.Embedder != nil && uc.Embeddings != nil {
+			if uc.embedNode(ctx, node) {
+				out.Embedded++
+			} else {
+				out.EmbedFailures++
+			}
+		}
 	}
 
 	for _, ee := range proposal.Edges {
@@ -209,6 +253,51 @@ func (uc *Extract) Run(ctx context.Context, in ExtractInput) (ExtractOutput, err
 	}
 
 	return out, nil
+}
+
+// embedNode generates a vector for the just-stored node and writes it
+// back. Returns true on success, false on any error along the way; the
+// caller increments the appropriate counter in ExtractOutput.
+//
+// Why ignore the specific error? The chat path is non-fatal here by
+// design (a missing vector still leaves the node fully usable for
+// listing / display); centralising "log + count" in the bridge would
+// duplicate context the usecase already has, so we keep the failure
+// boolean at this layer and let the call site decide what to do with
+// the count.
+func (uc *Extract) embedNode(ctx context.Context, node domain.Node) bool {
+	text := embeddingTextFor(node)
+	if text == "" {
+		return false
+	}
+	vec, err := uc.Embedder.Embed(ctx, text)
+	if err != nil || len(vec) == 0 {
+		return false
+	}
+	if err := uc.Embeddings.UpdateEmbedding(ctx, node.ID, vec, uc.Embedder.Model()); err != nil {
+		return false
+	}
+	return true
+}
+
+// embeddingTextFor builds the short string the embedder receives. We
+// concatenate title + content because the search query may match either
+// (a person node has only title; a thought node has only content). We
+// do NOT include type or metadata: the embedding space is for semantic
+// similarity, not categorical filtering — that is what indexes are for.
+func embeddingTextFor(n domain.Node) string {
+	parts := make([]string, 0, 2)
+	if n.Title != nil {
+		if t := strings.TrimSpace(*n.Title); t != "" {
+			parts = append(parts, t)
+		}
+	}
+	if n.Content != nil {
+		if c := strings.TrimSpace(*n.Content); c != "" {
+			parts = append(parts, c)
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 // nonEmpty returns p if its trimmed value is not empty, otherwise nil.

@@ -98,11 +98,17 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("select extractor: %w", err)
 	}
+	embedder, err := selectEmbedder(cfg)
+	if err != nil {
+		return fmt.Errorf("select embedder: %w", err)
+	}
 
 	extract := &extractionuc.Extract{
-		Extractor: extractorLLM,
-		Nodes:     nodesBridge{repo: nodesRepo},
-		Edges:     edgesBridge{repo: edgesRepo},
+		Extractor:  extractorLLM,
+		Nodes:      nodesBridge{repo: nodesRepo},
+		Edges:      edgesBridge{repo: edgesRepo},
+		Embedder:   embedder,
+		Embeddings: nodesRepo,
 	}
 	extractorBridge := messageExtractorBridge{
 		extract: extract,
@@ -299,6 +305,26 @@ func selectExtractor(cfg config.Config) (extractionuc.Extractor, error) {
 	}
 }
 
+// selectEmbedder picks the embeddings adapter following the same
+// stub/openai split as the chat and extraction LLMs. Stub vectors are
+// deterministic and dimension-matched to text-embedding-3-small (1536),
+// so a stubbed environment exercises the same DB column without any
+// schema branching.
+func selectEmbedder(cfg config.Config) (extractionuc.Embedder, error) {
+	switch cfg.LLM.Provider {
+	case config.LLMProviderUnset, config.LLMProviderStub:
+		return llmadapter.NewEmbedderStub(), nil
+	case config.LLMProviderOpenAI:
+		client, err := llmadapter.NewEmbedderOpenAI(cfg.LLM.OpenAIAPIKey, cfg.LLM.EmbeddingModel)
+		if err != nil {
+			return nil, fmt.Errorf("embedder openai: %w", err)
+		}
+		return client, nil
+	default:
+		return nil, fmt.Errorf("unknown llm provider %q", cfg.LLM.Provider)
+	}
+}
+
 // nodesBridge adapts the postgres nodes Repo to the consumer-side port
 // declared by extraction. The two CreateParams structs are structurally
 // identical but nominally distinct (Go is nominal), so we copy field
@@ -362,5 +388,7 @@ func (b messageExtractorBridge) ExtractFromMessage(ctx context.Context, userID, 
 		Str("message_id", messageID).
 		Int("nodes", len(out.NodeIDs)).
 		Int("edges", len(out.EdgeIDs)).
+		Int("embedded", out.Embedded).
+		Int("embed_failures", out.EmbedFailures).
 		Msg("extraction stored")
 }

@@ -9,6 +9,7 @@ export const NODE_TYPES = [
   'person',
   'place',
   'topic',
+  'time',
 ] as const;
 
 export type NodeType = (typeof NODE_TYPES)[number];
@@ -47,6 +48,9 @@ export const TYPE_COLOR: Record<NodeType, string> = {
   person: '#38bdf8',
   place: '#2dd4bf',
   topic: '#c084fc',
+  // Slightly different look: time-узлы — это ось, не сущность; их
+  // золотистый чтобы visually отличаться от остального графа.
+  time: '#fcd34d',
 };
 
 export function nodeLabel(n: GraphNode): string {

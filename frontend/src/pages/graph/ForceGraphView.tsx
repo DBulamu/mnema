@@ -21,6 +21,10 @@ type Props = {
   data: GraphResp;
   width: number;
   height: number;
+  // Optional click handler — receives the clicked node id. The component
+  // also reheats the simulation on click to give the user tactile
+  // feedback regardless of whether the parent reacts.
+  onNodeClick?: (id: string) => void;
 };
 
 // Per-session image cache: forces only one fetch per URL across renders
@@ -49,7 +53,7 @@ function getImage(url: string, onLoad: () => void): ImgState {
   return entry;
 }
 
-export function ForceGraphView({ data, width, height }: Props) {
+export function ForceGraphView({ data, width, height, onNodeClick }: Props) {
   const fgRef = useRef<ForceGraphMethods<FGNode, FGLink> | undefined>(undefined);
   const [hoverId, setHoverId] = useState<string | null>(null);
   // Trigger a redraw when an image finishes loading mid-simulation.
@@ -90,15 +94,22 @@ export function ForceGraphView({ data, width, height }: Props) {
   useEffect(() => {
     const fg = fgRef.current;
     if (!fg) return;
-    // Obsidian-feel forces: looser link, weaker repel than the d3 defaults
-    // so clusters spread out instead of forming one tight ball.
-    fg.d3Force('charge')?.strength(-220);
-    fg.d3Force('link')?.distance(80);
-    // Fit the whole graph into view once after the initial spread; from
-    // then on the user's pan/zoom is preserved.
+    // Obsidian-feel forces. Tunable values are kept here in one place
+    // because they interact: a stronger charge needs a stronger center
+    // to keep the layout from drifting offscreen.
+    fg.d3Force('charge')?.strength(-140); // softer repulsion; nodes used to drift apart
+    fg.d3Force('link')?.distance(60);     // shorter springs pull clusters tighter
+    // Fit the whole graph into view ONCE on initial mount. Refitting on
+    // every data update (or, worse, on every click that re-renders the
+    // parent) made the canvas zoom in/out and feel jumpy — that is the
+    // "graph zooms when I click a node" symptom. Once the user has the
+    // view they want, the simulation may re-energise on click/drag, but
+    // the camera stays put.
     const t = setTimeout(() => fg.zoomToFit(400, 40), 600);
     return () => clearTimeout(t);
-  }, [data]);
+    // Empty deps: mount-only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function isHighlighted(id: string): boolean {
     if (!hoverId) return true;
@@ -121,13 +132,18 @@ export function ForceGraphView({ data, width, height }: Props) {
       // back to a stable pose. The default d3 decay (~0.0228) reaches
       // alphaMin in ~300 ticks — without this the graph would orbit
       // forever, which felt wrong to the user.
-      d3VelocityDecay={0.4}
+      d3VelocityDecay={0.45}
+      // Stop simulating after ~3s — long enough to settle even a 200-
+      // node graph, short enough that clicks/drags don't compound into
+      // long drifting motions that look like "graph is fleeing".
+      cooldownTime={3000}
       onNodeHover={(n) => setHoverId(n?.id as string | null ?? null)}
       onNodeClick={(n) => {
-        console.log('[graph] click', n);
-        // A click is a tactile signal: a tiny reheat lets neighbors
-        // visibly acknowledge the interaction without a full drag.
-        fgRef.current?.d3ReheatSimulation();
+        // No reheat on plain click: the user said the graph "scatters"
+        // on click — that's the simulation re-energising and pushing
+        // every neighbour outward through the link springs. Click now
+        // only opens the detail panel; drag is what reheats (below).
+        if (n?.id && onNodeClick) onNodeClick(String(n.id));
       }}
       onNodeDrag={() => {
         // Keep the simulation hot for the entire drag so neighbors

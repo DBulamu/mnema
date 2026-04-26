@@ -72,6 +72,7 @@ components:
         - person
         - place
         - topic
+        - time
 
     EdgeType:
       type: string
@@ -787,7 +788,7 @@ paths:
             type: array
             items:
               type: string
-              enum: [thought, idea, memory, dream, emotion, task, event, person, place, topic]
+              enum: [thought, idea, memory, dream, emotion, task, event, person, place, topic, time]
           style: form
           explode: true
         - in: query
@@ -810,6 +811,48 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/Node'
+
+  /nodes/{id}:
+    get:
+      tags: [graph]
+      summary: |
+        Один узел + его 1-hop окружение (входящие/исходящие edges и
+        соседние узлы). Используется фронтом для панели деталей при
+        клике по узлу графа.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Узел и его соседи
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [node, edges, neighbors]
+                properties:
+                  node:
+                    $ref: '#/components/schemas/Node'
+                  edges:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Edge'
+                  neighbors:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Node'
+        '404':
+          description: Узел не найден или не принадлежит пользователю
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
   # ---------- RECALL (вспомнить из графа) ----------
 

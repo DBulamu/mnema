@@ -65,3 +65,10 @@ llm:
     provider: ollama
     ollama_url: http://localhost:11434
     ollama_model: qwen2.5:7b
+  # Extraction pipeline (message → graph nodes/edges) on a local ollama
+  # too — chat stays on stub for speed/determinism while the graph
+  # actually fills with real decomposed entities (person/place/event/...).
+  extraction:
+    provider: ollama
+    ollama_url: http://localhost:11434
+    ollama_model: qwen2.5:7b

@@ -18,23 +18,60 @@ import (
 // extractionSystemPrompt steers the model to produce a strict JSON
 // payload matching the schema below. The Russian voice mirrors the chat
 // system prompt — Mnema's UX is monolingual at MVP.
-const extractionSystemPrompt = `Ты помогаешь приложению Mnema извлекать узлы графа жизни из реплики пользователя.
-Верни строго JSON вида {"nodes":[...], "edges":[...]} без пояснений.
+//
+// Existing-id usage: the user message contains an optional "Existing
+// nodes" section the model uses to deduplicate against the user's prior
+// graph. When the new message mentions the same person/place/event, the
+// model returns "existing_id":"<uuid>" instead of inventing a new node.
+const extractionSystemPrompt = `Ты помогаешь приложению Mnema разбирать реплику пользователя на ОТДЕЛЬНЫЕ узлы графа жизни.
+
+ГЛАВНОЕ ПРАВИЛО: каждая ОТДЕЛЬНАЯ сущность — отдельный узел. Если в реплике упомянут человек — создай узел type=person. Если упомянуто место — узел type=place. Если упомянуто событие/действие — узел type=event. Эмоция — emotion. Задача — task. И связывай их рёбрами.
+
+НЕ создавай один общий узел типа "thought" с длинным текстом, кроме случая когда реплика — действительно абстрактная мысль без сущностей.
+
+Типы узлов: "thought","idea","memory","dream","emotion","task","event","person","place","topic"
+Типы рёбер: "part_of","mentions","related_to","triggered_by","evolved_into","about"
 
 Каждый node:
-  - "local_id": короткая строка вроде "n1", "n2" (нужна только для связей внутри ответа)
-  - "type": один из "thought","idea","memory","dream","emotion","task","event","person","place","topic"
-  - "title": краткое имя (для людей/мест/событий) или null
+  - "local_id": короткая строка вроде "n1", "n2"
+  - "type": один из 10 типов выше
+  - "title": краткое имя сущности (для person/place/event/topic) или null
   - "content": основной текст или null
-  - "occurred_at": ISO-8601 дата/время или null (только для событий и воспоминаний)
+  - "occurred_at": ISO-8601 если упомянута дата, иначе null
   - "occurred_at_precision": "day"|"month"|"year"|null
 
-Каждый edge:
-  - "source_local_id" и "target_local_id" ссылаются на local_id из nodes
-  - "type": один из "part_of","mentions","related_to","triggered_by","evolved_into","about"
+Каждый edge: "source_local_id" или "source_existing_id" + "target_local_id" или "target_existing_id" + "type".
 
-Если реплика — обычная мысль без структуры, верни один node типа "thought" с её содержимым в content и пустые edges.
-Не выдумывай узлы которых нет в тексте.`
+ПРИМЕР 1.
+Вход: "Скоро приедет бабушка в Дубай"
+Выход:
+{"nodes":[
+  {"local_id":"n1","type":"event","title":"приезд бабушки","content":"скоро приедет","occurred_at":null,"occurred_at_precision":null},
+  {"local_id":"n2","type":"person","title":"бабушка","content":null,"occurred_at":null,"occurred_at_precision":null},
+  {"local_id":"n3","type":"place","title":"Дубай","content":null,"occurred_at":null,"occurred_at_precision":null}
+],"edges":[
+  {"source_local_id":"n1","target_local_id":"n2","type":"mentions"},
+  {"source_local_id":"n1","target_local_id":"n3","type":"about"}
+]}
+
+ПРИМЕР 2.
+Вход: "Сегодня свадьба у Серёги в Москве, я волнуюсь"
+Выход:
+{"nodes":[
+  {"local_id":"n1","type":"event","title":"свадьба Серёги","content":"сегодня","occurred_at":null,"occurred_at_precision":null},
+  {"local_id":"n2","type":"person","title":"Серёга","content":null,"occurred_at":null,"occurred_at_precision":null},
+  {"local_id":"n3","type":"place","title":"Москва","content":null,"occurred_at":null,"occurred_at_precision":null},
+  {"local_id":"n4","type":"emotion","title":"волнение","content":"волнуюсь","occurred_at":null,"occurred_at_precision":null}
+],"edges":[
+  {"source_local_id":"n1","target_local_id":"n2","type":"mentions"},
+  {"source_local_id":"n1","target_local_id":"n3","type":"about"},
+  {"source_local_id":"n4","target_local_id":"n1","type":"triggered_by"}
+]}
+
+ДЕДУПЛИКАЦИЯ: если в "Existing nodes" уже есть тот же человек/место/событие — НЕ создавай новый узел. Используй "source_existing_id" / "target_existing_id" с uuid из списка. Создавай новый узел только для НОВЫХ сущностей.
+
+Не выдумывай узлы которых нет в тексте. Не выдумывай uuid'ы — только из списка Existing nodes.
+Верни строго один JSON-объект {"nodes":[...],"edges":[...]} без пояснений.`
 
 // ExtractorOpenAI calls OpenAI's chat-completions in JSON-mode and
 // decodes the structured payload into the extractor.Extraction shape.
@@ -116,25 +153,29 @@ type rawNode struct {
 }
 
 type rawEdge struct {
-	SourceLocalID string `json:"source_local_id"`
-	TargetLocalID string `json:"target_local_id"`
-	Type          string `json:"type"`
+	SourceLocalID    string `json:"source_local_id"`
+	SourceExistingID string `json:"source_existing_id"`
+	TargetLocalID    string `json:"target_local_id"`
+	TargetExistingID string `json:"target_existing_id"`
+	Type             string `json:"type"`
 }
 
 // Extract calls OpenAI in JSON-mode and parses the structured reply.
 // Type / edge-type validity is checked by the extraction usecase, so
 // this method only enforces schema-level invariants (parseable JSON,
 // known fields, well-formed timestamps).
-func (e *ExtractorOpenAI) Extract(ctx context.Context, content string) (extraction.Extraction, error) {
+func (e *ExtractorOpenAI) Extract(ctx context.Context, content string, existing []extraction.ExistingNode) (extraction.Extraction, error) {
 	if strings.TrimSpace(content) == "" {
 		return extraction.Extraction{}, nil
 	}
+
+	userTurn := buildExtractionUserMessage(content, existing)
 
 	body, err := json.Marshal(extractionRequest{
 		Model: e.model,
 		Messages: []chatMessage{
 			{Role: string(domain.RoleSystem), Content: extractionSystemPrompt},
-			{Role: string(domain.RoleUser), Content: content},
+			{Role: string(domain.RoleUser), Content: userTurn},
 		},
 		ResponseFormat: responseFormat{Type: responseFormatJSONObject},
 	})
@@ -224,12 +265,46 @@ func rawToExtraction(r rawExtraction) (extraction.Extraction, error) {
 	}
 	for _, re := range r.Edges {
 		out.Edges = append(out.Edges, extraction.ExtractedEdge{
-			SourceLocalID: re.SourceLocalID,
-			TargetLocalID: re.TargetLocalID,
-			Type:          domain.EdgeType(re.Type),
+			SourceLocalID:    re.SourceLocalID,
+			SourceExistingID: re.SourceExistingID,
+			TargetLocalID:    re.TargetLocalID,
+			TargetExistingID: re.TargetExistingID,
+			Type:             domain.EdgeType(re.Type),
 		})
 	}
 	return out, nil
+}
+
+// buildExtractionUserMessage formats the user turn for the extractor.
+// When the resolver passed any existing nodes, they are appended as a
+// compact table (id | type | title | content) so the model has the
+// surface text it needs to recognise duplicates and the uuids it must
+// reuse for cross-message edges. Without priors, this is just the raw
+// message — same shape extractor_stub assumes.
+func buildExtractionUserMessage(content string, existing []extraction.ExistingNode) string {
+	if len(existing) == 0 {
+		return content
+	}
+	var b strings.Builder
+	b.WriteString("Existing nodes (id | type | title | content):\n")
+	for _, e := range existing {
+		b.WriteString("- ")
+		b.WriteString(e.ID)
+		b.WriteString(" | ")
+		b.WriteString(string(e.Type))
+		b.WriteString(" | ")
+		if e.Title != nil {
+			b.WriteString(*e.Title)
+		}
+		b.WriteString(" | ")
+		if e.Content != nil {
+			b.WriteString(strings.ReplaceAll(*e.Content, "\n", " "))
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("\nMessage:\n")
+	b.WriteString(content)
+	return b.String()
 }
 
 // flexibleTimeLayouts lists the formats we accept from the model. The

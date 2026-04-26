@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api, ApiError } from '../lib/api';
 import { ForceGraphView } from './graph/ForceGraphView';
+import { NodeDetailPanel } from './graph/NodeDetailPanel';
 import { NODE_TYPES, TYPE_COLOR } from './graph/types';
 import type { GraphResp, NodeType } from './graph/types';
 
@@ -9,6 +10,10 @@ export function GraphPage() {
   const [selectedTypes, setSelectedTypes] = useState<Set<NodeType>>(new Set());
   const [since, setSince] = useState('');
   const [limit, setLimit] = useState(200);
+  // selectedNodeId opens the detail panel; clicking a neighbour swaps
+  // the id without closing the panel — this is the "browse the graph
+  // by clicking" interaction.
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
   const queryString = useMemo(() => {
     const params = new URLSearchParams();
@@ -139,7 +144,19 @@ export function GraphPage() {
           </p>
         )}
         {graph.data && graph.data.nodes.length > 0 && (
-          <ForceGraphView data={graph.data} width={size.w} height={size.h} />
+          <ForceGraphView
+            data={graph.data}
+            width={size.w}
+            height={size.h}
+            onNodeClick={setSelectedNodeId}
+          />
+        )}
+        {selectedNodeId && (
+          <NodeDetailPanel
+            nodeId={selectedNodeId}
+            onClose={() => setSelectedNodeId(null)}
+            onSelect={setSelectedNodeId}
+          />
         )}
       </div>
     </main>

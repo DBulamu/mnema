@@ -301,7 +301,13 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Список тредов пользователя */
+        /**
+         * Список тредов пользователя
+         * @description Threads ordered freshest-first by `updated_at`. Pagination —
+         *     keyset на `(updated_at, id)`. Передавайте `next_cursor` из
+         *     предыдущего ответа чтобы получить более старую страницу.
+         *     Опаковый формат — клиенту парсить нельзя.
+         */
         get: {
             parameters: {
                 query?: {
@@ -322,10 +328,12 @@ export interface paths {
                     content: {
                         "application/json": {
                             items?: components["schemas"]["Conversation"][];
+                            /** @description Передать следующим запросом; отсутствие — больше нет страниц */
                             next_cursor?: string | null;
                         };
                     };
                 };
+                400: components["responses"]["BadRequest"];
             };
         };
         put?: never;
@@ -365,11 +373,19 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** Получить тред с сообщениями */
+        /**
+         * Получить тред со страницей сообщений
+         * @description Возвращает тред + страницу сообщений в хронологическом порядке (старые сверху).
+         *     Курсор семантически — "загрузить старее": клиент держит самое старое
+         *     видимое сообщение и передаёт его cursor чтобы получить страницу под ним.
+         *     `next_cursor` всегда якорится на самом старом возвращённом сообщении;
+         *     пустой/отсутствующий — больше нет истории.
+         */
         get: {
             parameters: {
                 query?: {
                     limit?: number;
+                    cursor?: string;
                 };
                 header?: never;
                 path: {
@@ -388,9 +404,12 @@ export interface paths {
                         "application/json": {
                             conversation?: components["schemas"]["Conversation"];
                             messages?: components["schemas"]["Message"][];
+                            /** @description Передать следующим запросом для загрузки более старой истории; отсутствие — конец */
+                            next_cursor?: string | null;
                         };
                     };
                 };
+                400: components["responses"]["BadRequest"];
                 404: components["responses"]["NotFound"];
             };
         };
@@ -471,6 +490,61 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/conversations/{conversation_id}/messages/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                conversation_id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Стримящаяся версия `/conversations/{id}/messages`. Возвращает SSE
+         *     с последовательностью событий: `user_stored` (сразу после коммита
+         *     пользовательского сообщения) → `delta` × N (фрагменты ответа
+         *     ассистента) → `final` (оба сохранённых сообщения). При сетевой
+         *     или provider-ошибке — `error` (фатально, поток закрывается).
+         *
+         *     Используется фронтом для UX-маскировки латентности LLM. Не-стрим
+         *     endpoint остаётся для скриптов и не-браузерных клиентов.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    conversation_id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        content: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description SSE-поток событий чата */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/event-stream": string;
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/graph": {
         parameters: {
             query?: never;
@@ -541,7 +615,7 @@ export interface paths {
                     q: string;
                     mode?: "text" | "semantic";
                     /** @description Фильтр по типам узлов. CSV или повтор параметра. */
-                    type?: ("thought" | "idea" | "memory" | "dream" | "emotion" | "task" | "event" | "person" | "place" | "topic")[];
+                    type?: ("thought" | "idea" | "memory" | "dream" | "emotion" | "task" | "event" | "person" | "place" | "topic" | "time")[];
                     limit?: number;
                 };
                 header?: never;
@@ -559,6 +633,61 @@ export interface paths {
                         "application/json": {
                             nodes: components["schemas"]["Node"][];
                         };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/nodes/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Один узел + его 1-hop окружение (входящие/исходящие edges и
+         *     соседние узлы). Используется фронтом для панели деталей при
+         *     клике по узлу графа.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Узел и его соседи */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            node: components["schemas"]["Node"];
+                            edges: components["schemas"]["Edge"][];
+                            neighbors: components["schemas"]["Node"][];
+                        };
+                    };
+                };
+                /** @description Узел не найден или не принадлежит пользователю */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
                     };
                 };
             };
@@ -619,6 +748,58 @@ export interface paths {
                             nodes: components["schemas"]["Node"][];
                             lang: string;
                         };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/recall/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Стримящаяся версия `/recall`. Возвращает SSE с событиями:
+         *     `meta` (язык, число anchors/candidates) → `candidates` (узлы целиком,
+         *     чтобы UI начал рендер карточек до завершения LLM) → `delta` × N
+         *     (фрагменты ответа в рунах) → `final` (валидированные answer + spans
+         *     + ссылки на узлы). При ошибке — `error`.
+         *
+         *     Spans передаются только в `final`: rune-offsets можно валидировать
+         *     только против полной строки ответа.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        text: string;
+                        lang?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description SSE-поток событий recall */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/event-stream": string;
                     };
                 };
             };
@@ -1004,7 +1185,7 @@ export interface components {
             details?: Record<string, never>;
         };
         /** @enum {string} */
-        NodeType: "thought" | "idea" | "memory" | "dream" | "emotion" | "task" | "event" | "person" | "place" | "topic";
+        NodeType: "thought" | "idea" | "memory" | "dream" | "emotion" | "task" | "event" | "person" | "place" | "topic" | "time";
         /** @enum {string} */
         EdgeType: "part_of" | "mentions" | "related_to" | "triggered_by" | "evolved_into" | "about";
         User: {

@@ -113,6 +113,11 @@ func run() error {
 		Edges:      edgesBridge{repo: edgesRepo},
 		Embedder:   embedder,
 		Embeddings: nodesRepo,
+		Resolver:   knnResolver{embedder: embedder, repo: nodesRepo, limit: knnResolverLimit},
+		// FindOrCreateTime on the postgres nodes repo matches the
+		// consumer-side timeNodeFinder port shape exactly, so the repo
+		// satisfies it structurally — no bridge needed.
+		TimeNodes: nodesRepo,
 	}
 	extractorBridge := messageExtractorBridge{
 		extract: extract,
@@ -169,6 +174,13 @@ func run() error {
 		Nodes: graphNodesBridge{repo: nodesRepo},
 		Edges: edgesRepo,
 	}
+	getNode := &graphuc.GetNode{
+		// nodesRepo satisfies the consumer-side nodeReader port directly:
+		// GetByID and ListByIDs match shape-for-shape, no bridge needed.
+		Nodes: nodesRepo,
+		// edgesRepo's ListByNode also matches the consumer port directly.
+		Edges: edgesRepo,
+	}
 	searchGraph := &graphuc.Search{
 		Nodes:    graphSearchNodesBridge{repo: nodesRepo},
 		Embedder: embedder,
@@ -211,6 +223,7 @@ func run() error {
 	rest.RegisterSendMessage(api, sendMessage)
 	rest.RegisterSendMessageStream(api, sendMessage)
 	rest.RegisterGetGraph(api, getGraph)
+	rest.RegisterGetNode(api, getNode)
 	rest.RegisterSearchGraph(api, searchGraph)
 	rest.RegisterRecall(api, recall)
 	rest.RegisterRecallStream(api, recall)
@@ -377,12 +390,21 @@ func selectMailer(cfg config.Config) mailer {
 	return emailadapter.NewSMTPSender(cfg.SMTP.Host, cfg.SMTP.Port, cfg.SMTP.From)
 }
 
-// selectExtractor picks the extractor adapter the same way as
-// selectChatLLM. Both sides of the LLM workload (chat reply +
-// extraction) follow cfg.LLM.Provider so an environment is either
-// "fully stubbed" or "fully OpenAI" — we don't currently mix.
+// selectExtractor picks the extractor adapter. Extraction has its own
+// provider switch (cfg.LLM.Extraction.Provider) — running chat=stub
+// with extraction=ollama is the recommended local-dev combo so the
+// graph fills with real decomposed entities while the chat reply stays
+// fast and deterministic.
+//
+// When cfg.LLM.Extraction.Provider is unset, we fall back to the
+// top-level cfg.LLM.Provider so older configs (chat+extraction share
+// one switch) keep their old behaviour.
 func selectExtractor(cfg config.Config) (extractionuc.Extractor, error) {
-	switch cfg.LLM.Provider {
+	provider := cfg.LLM.Extraction.Provider
+	if provider == config.LLMProviderUnset {
+		provider = cfg.LLM.Provider
+	}
+	switch provider {
 	case config.LLMProviderUnset, config.LLMProviderStub:
 		return llmadapter.NewExtractorStub(), nil
 	case config.LLMProviderOpenAI:
@@ -391,8 +413,22 @@ func selectExtractor(cfg config.Config) (extractionuc.Extractor, error) {
 			return nil, fmt.Errorf("extractor openai: %w", err)
 		}
 		return client, nil
+	case config.LLMProviderOllama:
+		model := strings.TrimSpace(cfg.LLM.Extraction.OllamaModel)
+		if model == "" {
+			return nil, fmt.Errorf("llm.extraction.ollama_model is required when llm.extraction.provider=ollama")
+		}
+		opts := []llmadapter.OllamaOption{}
+		if u := strings.TrimSpace(cfg.LLM.Extraction.OllamaURL); u != "" {
+			opts = append(opts, llmadapter.WithOllamaBaseURL(u))
+		}
+		client, err := llmadapter.NewExtractorOllama(model, opts...)
+		if err != nil {
+			return nil, fmt.Errorf("extractor ollama: %w", err)
+		}
+		return client, nil
 	default:
-		return nil, fmt.Errorf("unknown llm provider %q", cfg.LLM.Provider)
+		return nil, fmt.Errorf("unknown extraction provider %q", provider)
 	}
 }
 
@@ -606,6 +642,95 @@ type dbPinger struct {
 
 func (p dbPinger) Ping(ctx context.Context) error {
 	return p.pool.Ping(ctx)
+}
+
+// knnResolverLimit caps how many existing nodes the resolver hands to
+// the extractor. Each existing node is ~80–120 tokens of prompt budget
+// (uuid + type + title + content) so 20 keeps us well under a k7b model's
+// effective context window while still giving the LLM enough variety
+// to disambiguate "бабушка" from "мама" or "Дубай" from "Питер".
+const knnResolverLimit = 20
+
+// knnResolver satisfies extraction.CandidateResolver. It hands the
+// extractor a shortlist of existing nodes likely-referenced by the
+// new message so the LLM can reuse ids instead of creating duplicates.
+//
+// Two retrieval paths run in parallel and are merged:
+//
+//  1. **Semantic** — embed the message, search by cosine similarity.
+//     Strong when the embedder is a real model. Useless on the stub
+//     (sha256-tile produces uncorrelated vectors), which is why we
+//     don't rely on it alone.
+//
+//  2. **Lexical** — text-search on the message itself against existing
+//     titles/content via pg_trgm. Catches "бабушка" mentioned again
+//     literally even when the embedder is a stub. Bridges the local-
+//     dev gap until a real embedder is wired.
+//
+// Results are merged by id, semantic order first (the LLM tends to
+// trust earlier entries more). Errors in either path degrade to the
+// other; both failing returns no shortlist (the extractor still runs).
+type knnResolver struct {
+	embedder extractionuc.Embedder
+	repo     *pgnodes.Repo
+	limit    int
+}
+
+func (r knnResolver) ResolveCandidates(ctx context.Context, userID, content string) ([]extractionuc.ExistingNode, error) {
+	if r.repo == nil || strings.TrimSpace(content) == "" {
+		return nil, nil
+	}
+
+	seen := make(map[string]struct{}, r.limit*2)
+	out := make([]extractionuc.ExistingNode, 0, r.limit)
+
+	collect := func(nodes []domain.Node) {
+		for _, n := range nodes {
+			if _, ok := seen[n.ID]; ok {
+				continue
+			}
+			seen[n.ID] = struct{}{}
+			out = append(out, extractionuc.ExistingNode{
+				ID:      n.ID,
+				Type:    n.Type,
+				Title:   n.Title,
+				Content: n.Content,
+			})
+			if len(out) >= r.limit {
+				return
+			}
+		}
+	}
+
+	// Semantic path. We swallow the error: stub-embedder still
+	// "succeeds" but returns garbage similarities, so it would be
+	// misleading to escalate.
+	if r.embedder != nil {
+		if vec, err := r.embedder.Embed(ctx, content); err == nil && len(vec) > 0 {
+			if nodes, err := r.repo.Search(ctx, pgnodes.SearchParams{
+				UserID: userID,
+				Vector: vec,
+				Limit:  r.limit,
+			}); err == nil {
+				collect(nodes)
+			}
+		}
+	}
+
+	// Lexical path — only when we have budget left. pg_trgm matches
+	// on title and content, so "бабушка" in a new message will recall
+	// the existing person:бабушка node even with a stub embedder.
+	if len(out) < r.limit {
+		if nodes, err := r.repo.Search(ctx, pgnodes.SearchParams{
+			UserID: userID,
+			Query:  content,
+			Limit:  r.limit - len(out),
+		}); err == nil {
+			collect(nodes)
+		}
+	}
+
+	return out, nil
 }
 
 // messageExtractorBridge satisfies chatuc.MessageExtractor by running

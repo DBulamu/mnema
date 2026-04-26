@@ -21,6 +21,11 @@ const (
 	NodePerson  NodeType = "person"
 	NodePlace   NodeType = "place"
 	NodeTopic   NodeType = "topic"
+	// NodeTime is a time-period anchor — "2025", "2025-03", "2025-03-12".
+	// Built deterministically by the extraction usecase from any node's
+	// occurred_at, never proposed by the LLM. Connects regular nodes via
+	// part_of edges so the graph carries a navigable time axis.
+	NodeTime NodeType = "time"
 )
 
 // Valid reports whether t is one of the known node types. Used to
@@ -28,7 +33,7 @@ const (
 func (t NodeType) Valid() bool {
 	switch t {
 	case NodeThought, NodeIdea, NodeMemory, NodeDream, NodeEmotion,
-		NodeTask, NodeEvent, NodePerson, NodePlace, NodeTopic:
+		NodeTask, NodeEvent, NodePerson, NodePlace, NodeTopic, NodeTime:
 		return true
 	}
 	return false

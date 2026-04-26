@@ -27,7 +27,7 @@ const stubExtractContentLimit = 200
 // Extract returns one thought-node carrying a truncated copy of the
 // content. Empty input yields an empty Extraction (the caller handles
 // the no-op).
-func (e *ExtractorStub) Extract(_ context.Context, content string) (extraction.Extraction, error) {
+func (e *ExtractorStub) Extract(_ context.Context, content string, _ []extraction.ExistingNode) (extraction.Extraction, error) {
 	trimmed := strings.TrimSpace(content)
 	if trimmed == "" {
 		return extraction.Extraction{}, nil

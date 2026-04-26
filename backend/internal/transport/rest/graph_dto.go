@@ -17,7 +17,7 @@ import (
 // emit nil — i.e. the field is absent from the response.
 type nodeDTO struct {
 	ID                  string  `json:"id" format:"uuid"`
-	Type                string  `json:"type" enum:"thought,idea,memory,dream,emotion,task,event,person,place,topic"`
+	Type                string  `json:"type" enum:"thought,idea,memory,dream,emotion,task,event,person,place,topic,time"`
 	Title               *string `json:"title,omitempty"`
 	Content             *string `json:"content,omitempty"`
 	Metadata            any     `json:"metadata,omitempty"`

@@ -154,6 +154,15 @@ type LLMConfig struct {
 	// OpenAI while recall stays on a local ollama is a supported and
 	// expected combo on the MVP.
 	Recall RecallLLMConfig `yaml:"recall"`
+
+	// Extraction has its own switch for the same reason as Recall:
+	// chat replies are latency-sensitive (and cheap on stub), while
+	// extraction is structured-output-sensitive — the natural pairing
+	// is chat=stub/openai with extraction=ollama on local dev so the
+	// graph actually fills with real entities while the chat stays
+	// deterministic. When Provider is unset, we fall back to the top-
+	// level LLM.Provider so existing configs keep their old behaviour.
+	Extraction ExtractionLLMConfig `yaml:"extraction"`
 }
 
 // RecallLLMConfig configures the recall pipeline's LLM steps separately
@@ -162,6 +171,16 @@ type RecallLLMConfig struct {
 	Provider   LLMProvider `yaml:"provider"`
 	OllamaURL  string      `yaml:"ollama_url"`
 	OllamaModel string     `yaml:"ollama_model"`
+}
+
+// ExtractionLLMConfig configures the message-to-graph extractor
+// independently of the chat reply path. Same shape as RecallLLMConfig
+// because both are local-ollama-friendly: privacy + zero per-request
+// cost are the same priorities.
+type ExtractionLLMConfig struct {
+	Provider    LLMProvider `yaml:"provider"`
+	OllamaURL   string      `yaml:"ollama_url"`
+	OllamaModel string      `yaml:"ollama_model"`
 }
 
 // envVarName is the OS environment variable that selects which YAML
@@ -235,6 +254,9 @@ func (c Config) validate() error {
 	}
 	if !c.LLM.Recall.Provider.Valid() {
 		return fmt.Errorf("invalid llm.recall.provider %q (want: stub|openai|ollama)", c.LLM.Recall.Provider)
+	}
+	if !c.LLM.Extraction.Provider.Valid() {
+		return fmt.Errorf("invalid llm.extraction.provider %q (want: stub|openai|ollama)", c.LLM.Extraction.Provider)
 	}
 	if c.Env == EnvProd {
 		if c.JWT.Secret == jwtSecretPlaceholder {

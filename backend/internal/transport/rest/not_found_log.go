@@ -1,8 +1,12 @@
 package rest
 
 import (
+	"bufio"
+	"errors"
 	"log/slog"
+	"net"
 	"net/http"
+	"time"
 )
 
 // statusRecorder is a minimal http.ResponseWriter wrapper that captures
@@ -26,6 +30,45 @@ func (r *statusRecorder) Write(b []byte) (int, error) {
 		r.wrote = true
 	}
 	return r.ResponseWriter.Write(b)
+}
+
+// Flush, Hijack, SetWriteDeadline and SetReadDeadline are delegated to the
+// wrapped ResponseWriter so SSE / WebSocket / streaming handlers keep
+// working through this middleware. Without them, huma/sse type-asserts
+// fail and the stream errors with "unable to flush" / "write deadline
+// not supported by underlying writer".
+
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := r.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, errors.New("hijack not supported")
+}
+
+func (r *statusRecorder) SetWriteDeadline(t time.Time) error {
+	type writeDeadliner interface {
+		SetWriteDeadline(time.Time) error
+	}
+	if d, ok := r.ResponseWriter.(writeDeadliner); ok {
+		return d.SetWriteDeadline(t)
+	}
+	return http.ErrNotSupported
+}
+
+func (r *statusRecorder) SetReadDeadline(t time.Time) error {
+	type readDeadliner interface {
+		SetReadDeadline(time.Time) error
+	}
+	if d, ok := r.ResponseWriter.(readDeadliner); ok {
+		return d.SetReadDeadline(t)
+	}
+	return http.ErrNotSupported
 }
 
 // LogUnmatchedRoutes wraps an http.Handler and logs requests that the

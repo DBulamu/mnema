@@ -101,6 +101,25 @@ type AnswerGenerator interface {
 	GenerateAnswer(ctx context.Context, text, lang string, candidates []domain.Node) (AnswerDraft, error)
 }
 
+// AnswerStreamGenerator is the streaming variant of AnswerGenerator.
+// Implementations push partial answer text via deltas and a single
+// terminal AnswerDraft via final. The channel is closed when the
+// generator is done; an error is reported by closing early and
+// returning a non-nil error from the call site (see RunStream).
+//
+// Why a separate interface and not a generic "streaming" wrapper:
+// adapters that cannot stream (stub, OpenAI on this codebase today)
+// stay simple by not implementing this. Composition root falls back
+// to the sync generator and emits a single delta+final pair.
+type AnswerStreamGenerator interface {
+	GenerateAnswerStream(ctx context.Context, text, lang string, candidates []domain.Node, emit AnswerEmitter) (AnswerDraft, error)
+}
+
+// AnswerEmitter is the callback the streaming adapter calls for each
+// text fragment as it arrives from the model. Returning an error
+// aborts the stream — typically because the client disconnected.
+type AnswerEmitter func(delta string) error
+
 // AnswerDraft is the unvalidated answer-generator output. Span offsets
 // are rune indices; NodeIDs may include ids the model hallucinated —
 // the validator drops those entries.
@@ -111,10 +130,51 @@ type AnswerDraft struct {
 
 // Recall is the orchestrator. Each port is required; nil ports cause
 // run-time errors rather than a silent half-pipeline.
+//
+// AnswersStream is optional: when nil RunStream falls back to the sync
+// AnswerGenerator and emits one synthetic delta carrying the full
+// answer. That keeps the SSE contract uniform for clients regardless of
+// which provider is wired (stub, ollama, future openai).
 type Recall struct {
-	Anchors    AnchorExtractor
-	Candidates CandidateFinder
-	Answers    AnswerGenerator
+	Anchors       AnchorExtractor
+	Candidates    CandidateFinder
+	Answers       AnswerGenerator
+	AnswersStream AnswerStreamGenerator
+}
+
+// StreamEvent is the union type RunStream pushes to the transport
+// layer. Exactly one of the *Event fields is set. Order is fixed:
+// Meta, then Candidates, then zero or more Delta, then Final.
+//
+// We don't model an explicit Error event: errors short-circuit
+// RunStream and are returned as Go errors — the transport renders
+// them as SSE error events of its own choosing. Mixing in-band errors
+// with the contract events confused early prototypes.
+type StreamEvent struct {
+	Meta       *MetaEvent
+	Candidates *CandidatesEvent
+	Delta      *DeltaEvent
+	Final      *FinalEvent
+}
+
+type MetaEvent struct {
+	Lang       string
+	NumAnchors int
+	NumCands   int
+}
+
+type CandidatesEvent struct {
+	Nodes []domain.Node
+}
+
+type DeltaEvent struct {
+	Text string
+}
+
+type FinalEvent struct {
+	Answer string
+	Spans  []Span
+	Nodes  []domain.Node
 }
 
 // Input is what the transport hands the usecase.
@@ -178,6 +238,96 @@ func (uc *Recall) Run(ctx context.Context, in Input) (Output, error) {
 		Nodes:  nodes,
 		Lang:   lang,
 	}, nil
+}
+
+// RunStream is the streaming variant of Run. The pipeline is
+// identical (anchor → candidates → answer → validate), but the
+// transport sees four classes of events instead of one final
+// response. The emit callback is called synchronously on the
+// caller's goroutine — there is no buffering. The transport is
+// responsible for not blocking on a slow client (huma/sse handles
+// that for us via a write deadline).
+//
+// Validation runs once at the end, on the assembled answer string.
+// We never validate spans against a partial answer because spans
+// are rune offsets into the final string, not into the stream so
+// far. Streaming the answer is purely a UX latency mask; the
+// authoritative output is the Final event.
+func (uc *Recall) RunStream(ctx context.Context, in Input, emit func(StreamEvent) error) error {
+	if uc.Anchors == nil || uc.Candidates == nil || uc.Answers == nil {
+		return fmt.Errorf("recall: pipeline not fully wired")
+	}
+	if in.UserID == "" {
+		return fmt.Errorf("%w: user_id is required", domain.ErrInvalidArgument)
+	}
+	text := strings.TrimSpace(in.Text)
+	if text == "" {
+		return fmt.Errorf("%w: text is required", domain.ErrInvalidArgument)
+	}
+	if utf8.RuneCountInString(text) > maxTextLen {
+		return fmt.Errorf("%w: text exceeds %d runes", domain.ErrInvalidArgument, maxTextLen)
+	}
+	lang := strings.TrimSpace(in.Lang)
+	if lang == "" {
+		lang = defaultLang
+	}
+	if len(lang) > maxLangLen {
+		return fmt.Errorf("%w: lang too long", domain.ErrInvalidArgument)
+	}
+
+	anchors, err := uc.Anchors.ExtractAnchors(ctx, text, lang)
+	if err != nil {
+		return fmt.Errorf("extract anchors: %w", err)
+	}
+	anchors = dropEmptyAnchors(anchors)
+
+	candidates, err := uc.Candidates.FindCandidates(ctx, in.UserID, text, anchors)
+	if err != nil {
+		return fmt.Errorf("find candidates: %w", err)
+	}
+
+	if err := emit(StreamEvent{Meta: &MetaEvent{
+		Lang:       lang,
+		NumAnchors: len(anchors),
+		NumCands:   len(candidates),
+	}}); err != nil {
+		return err
+	}
+	if err := emit(StreamEvent{Candidates: &CandidatesEvent{Nodes: candidates}}); err != nil {
+		return err
+	}
+
+	var draft AnswerDraft
+	if uc.AnswersStream != nil {
+		draft, err = uc.AnswersStream.GenerateAnswerStream(ctx, text, lang, candidates, func(delta string) error {
+			if delta == "" {
+				return nil
+			}
+			return emit(StreamEvent{Delta: &DeltaEvent{Text: delta}})
+		})
+	} else {
+		// Fallback for adapters without native streaming. Emit one
+		// synthetic delta with the full answer so the wire shape stays
+		// uniform.
+		draft, err = uc.Answers.GenerateAnswer(ctx, text, lang, candidates)
+		if err == nil && draft.Answer != "" {
+			if eerr := emit(StreamEvent{Delta: &DeltaEvent{Text: draft.Answer}}); eerr != nil {
+				return eerr
+			}
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("generate answer: %w", err)
+	}
+
+	answer, spans := validateDraft(draft, candidates)
+	nodes := selectReferencedNodes(candidates, spans)
+
+	return emit(StreamEvent{Final: &FinalEvent{
+		Answer: answer,
+		Spans:  spans,
+		Nodes:  nodes,
+	}})
 }
 
 func dropEmptyAnchors(in []Anchor) []Anchor {

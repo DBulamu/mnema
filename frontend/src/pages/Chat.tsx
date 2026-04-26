@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, ApiError } from '../lib/api';
+import { api, ApiError, streamSSE } from '../lib/api';
 
 type Conversation = {
   id: string;
@@ -20,12 +20,24 @@ type Message = {
 type ListConvs = { items: Conversation[] };
 type GetConv = { conversation: Conversation; messages: Message[] };
 type StartConv = { conversation: Conversation };
-type SendMsg = { user_message: Message; assistant_message: Message };
+
+// SSE event payloads from POST /v1/conversations/{id}/messages/stream.
+type ChatUserStored = { message: Message };
+type ChatDelta = { text: string };
+type ChatFinal = { user_message: Message; assistant_message: Message };
+type ChatErrorEvent = { message: string };
 
 export function ChatPage() {
   const qc = useQueryClient();
   const [activeId, setActiveId] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
+  // Live-streamed assistant draft for the active conversation. Cleared
+  // when the final event arrives and the persisted assistant message
+  // takes over from the messages query. Kept in component state so
+  // React Query's cache stays a pure mirror of server-confirmed rows.
+  const [streamingDraft, setStreamingDraft] = useState<string>('');
+  const [streaming, setStreaming] = useState(false);
+  const [streamError, setStreamError] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const conversations = useQuery({
@@ -55,29 +67,86 @@ export function ChatPage() {
     },
   });
 
-  const sendMsg = useMutation({
-    mutationFn: (content: string) =>
-      api<SendMsg>(`/v1/conversations/${activeId}/messages`, {
-        method: 'POST',
-        body: { content },
-      }),
-    onSuccess: () => {
+  // We stream the assistant reply over SSE so long replies feel
+  // responsive. The user message is committed before the LLM call,
+  // so we render an optimistic echo from `user_stored` (server-
+  // generated id) and accumulate `delta` events into streamingDraft.
+  // On `final`, both rows are authoritative — refetch the thread
+  // and clear the draft.
+  async function sendStreamed(content: string) {
+    if (!activeId) return;
+    setStreaming(true);
+    setStreamError(null);
+    setStreamingDraft('');
+    try {
+      await streamSSE<ChatUserStored | ChatDelta | ChatFinal | ChatErrorEvent>(
+        `/v1/conversations/${activeId}/messages/stream`,
+        { method: 'POST', body: { content } },
+        (ev) => {
+          switch (ev.type) {
+            case 'user_stored': {
+              const data = ev.data as ChatUserStored;
+              // Optimistically inject the just-stored user message
+              // into the cached conversation so it appears before
+              // the assistant deltas start arriving.
+              qc.setQueryData<GetConv>(['conversation', activeId], (prev) => {
+                if (!prev) return prev;
+                if (prev.messages.some((m) => m.id === data.message.id)) return prev;
+                return { ...prev, messages: [...prev.messages, data.message] };
+              });
+              break;
+            }
+            case 'delta': {
+              const data = ev.data as ChatDelta;
+              setStreamingDraft((s) => s + data.text);
+              break;
+            }
+            case 'final': {
+              const data = ev.data as ChatFinal;
+              setStreamingDraft('');
+              qc.setQueryData<GetConv>(['conversation', activeId], (prev) => {
+                if (!prev) return prev;
+                // Replace any optimistic user copy and append the
+                // assistant message. This is idempotent if the server
+                // already echoed user_stored.
+                const others = prev.messages.filter(
+                  (m) => m.id !== data.user_message.id && m.id !== data.assistant_message.id,
+                );
+                return {
+                  ...prev,
+                  messages: [...others, data.user_message, data.assistant_message],
+                };
+              });
+              qc.invalidateQueries({ queryKey: ['conversations'] });
+              break;
+            }
+            case 'error': {
+              const data = ev.data as ChatErrorEvent;
+              setStreamError(data.message ?? 'stream error');
+              break;
+            }
+          }
+        },
+      );
       setDraft('');
-      qc.invalidateQueries({ queryKey: ['conversation', activeId] });
-      qc.invalidateQueries({ queryKey: ['conversations'] });
-    },
-  });
+    } catch (err) {
+      setStreamError(err instanceof ApiError ? `${err.status}: ${err.message}` : (err as Error).message);
+    } finally {
+      setStreaming(false);
+    }
+  }
 
   // Auto-scroll on new messages — pinned tail is the expected chat UX
-  // and we don't have message virtualization yet.
+  // and we don't have message virtualization yet. Also reacts to the
+  // streaming draft growing so the in-progress reply stays visible.
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [conversation.data?.messages.length]);
+  }, [conversation.data?.messages.length, streamingDraft]);
 
   function onSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!draft.trim() || !activeId) return;
-    sendMsg.mutate(draft);
+    if (!draft.trim() || !activeId || streaming) return;
+    void sendStreamed(draft);
   }
 
   return (
@@ -149,6 +218,12 @@ export function ChatPage() {
                     <div>{m.content}</div>
                   </div>
                 ))}
+                {streamingDraft && (
+                  <div className="message assistant" style={{ opacity: 0.85 }}>
+                    <div className="role">assistant…</div>
+                    <div>{streamingDraft}</div>
+                  </div>
+                )}
                 <div ref={messagesEndRef} />
               </div>
 
@@ -157,7 +232,7 @@ export function ChatPage() {
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
                   placeholder="Что у тебя в голове?"
-                  disabled={sendMsg.isPending}
+                  disabled={streaming}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
                       e.preventDefault();
@@ -169,11 +244,11 @@ export function ChatPage() {
                   <button
                     type="submit"
                     className="primary"
-                    disabled={sendMsg.isPending || !draft.trim()}
+                    disabled={streaming || !draft.trim()}
                   >
-                    {sendMsg.isPending ? 'Отправка…' : 'Отправить (⌘/Ctrl+Enter)'}
+                    {streaming ? 'Отправка…' : 'Отправить (⌘/Ctrl+Enter)'}
                   </button>
-                  {sendMsg.error && <span className="error">{humanize(sendMsg.error)}</span>}
+                  {streamError && <span className="error">{streamError}</span>}
                 </div>
               </form>
             </>

@@ -636,6 +636,45 @@ paths:
         '400':
           $ref: '#/components/responses/BadRequest'
 
+  /conversations/{conversation_id}/messages/stream:
+    parameters:
+      - in: path
+        name: conversation_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      tags: [chat]
+      summary: |
+        Стримящаяся версия `/conversations/{id}/messages`. Возвращает SSE
+        с последовательностью событий: `user_stored` (сразу после коммита
+        пользовательского сообщения) → `delta` × N (фрагменты ответа
+        ассистента) → `final` (оба сохранённых сообщения). При сетевой
+        или provider-ошибке — `error` (фатально, поток закрывается).
+
+        Используется фронтом для UX-маскировки латентности LLM. Не-стрим
+        endpoint остаётся для скриптов и не-браузерных клиентов.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content:
+                  type: string
+      responses:
+        '200':
+          description: SSE-поток событий чата
+          content:
+            text/event-stream:
+              schema:
+                type: string
+
   # ---------- GRAPH ----------
 
   /graph:
@@ -807,6 +846,43 @@ paths:
                       $ref: '#/components/schemas/Node'
                   lang:
                     type: string
+
+  /recall/stream:
+    post:
+      tags: [recall]
+      summary: |
+        Стримящаяся версия `/recall`. Возвращает SSE с событиями:
+        `meta` (язык, число anchors/candidates) → `candidates` (узлы целиком,
+        чтобы UI начал рендер карточек до завершения LLM) → `delta` × N
+        (фрагменты ответа в рунах) → `final` (валидированные answer + spans
+        + ссылки на узлы). При ошибке — `error`.
+
+        Spans передаются только в `final`: rune-offsets можно валидировать
+        только против полной строки ответа.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text:
+                  type: string
+                  minLength: 1
+                  maxLength: 2000
+                lang:
+                  type: string
+                  maxLength: 16
+      responses:
+        '200':
+          description: SSE-поток событий recall
+          content:
+            text/event-stream:
+              schema:
+                type: string
 
   # ---------- NODES (CRUD для UI) ----------
 

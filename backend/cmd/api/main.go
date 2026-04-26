@@ -152,12 +152,14 @@ func run() error {
 		Conversations: conversationsRepo,
 		Messages:      messagesRepo,
 	}
+	chatStreamLLM := chatLLMStreamBridgeOrNil(chatLLM)
 	sendMessage := &chatuc.SendMessage{
 		Conversations: conversationsRepo,
 		Messages:      messagesRepo,
 		History:       messagesRepo,
 		Toucher:       conversationsRepo,
 		LLM:           chatLLM,
+		LLMStream:     chatStreamLLM,
 		Extractor:     extractorBridge,
 		Clock:         clock,
 	}
@@ -205,9 +207,11 @@ func run() error {
 	rest.RegisterListConversations(api, listConversations)
 	rest.RegisterGetConversation(api, getConversation)
 	rest.RegisterSendMessage(api, sendMessage)
+	rest.RegisterSendMessageStream(api, sendMessage)
 	rest.RegisterGetGraph(api, getGraph)
 	rest.RegisterSearchGraph(api, searchGraph)
 	rest.RegisterRecall(api, recall)
+	rest.RegisterRecallStream(api, recall)
 
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.HTTPPort),
@@ -270,6 +274,44 @@ func (b chatLLMBridge) Reply(ctx context.Context, history []chatuc.Turn) (string
 		turns[i] = llmadapter.Turn{Role: t.Role, Content: t.Content}
 	}
 	return b.provider.Reply(ctx, turns)
+}
+
+// llmStreamReplier is the optional streaming counterpart. Stub and
+// OpenAI both implement it; future providers may not — the bridge
+// below picks it up via a type assertion so wiring is no extra
+// work.
+type llmStreamReplier interface {
+	ReplyStream(ctx context.Context, history []llmadapter.Turn, emit func(string) error) (string, error)
+}
+
+// chatLLMStreamBridge wraps a streaming-capable provider in the
+// chat.LLMStreamReplier shape.
+type chatLLMStreamBridge struct {
+	provider llmStreamReplier
+}
+
+func (b chatLLMStreamBridge) ReplyStream(ctx context.Context, history []chatuc.Turn, emit func(string) error) (string, error) {
+	turns := make([]llmadapter.Turn, len(history))
+	for i, t := range history {
+		turns[i] = llmadapter.Turn{Role: t.Role, Content: t.Content}
+	}
+	return b.provider.ReplyStream(ctx, turns, emit)
+}
+
+// chatLLMStreamBridgeOrNil returns a stream bridge if the underlying
+// provider implements ReplyStream, otherwise nil. SendMessage handles
+// nil with a single-delta fallback — keeping the wiring conditional
+// here means no provider is forced to add a placeholder method.
+func chatLLMStreamBridgeOrNil(replier chatuc.LLMReplier) chatuc.LLMStreamReplier {
+	bridge, ok := replier.(chatLLMBridge)
+	if !ok {
+		return nil
+	}
+	streamer, ok := bridge.provider.(llmStreamReplier)
+	if !ok {
+		return nil
+	}
+	return chatLLMStreamBridge{provider: streamer}
 }
 
 // selectChatLLM picks the LLM adapter based on config.LLM.Provider.
@@ -383,10 +425,14 @@ func selectRecall(cfg config.Config, finder recalluc.CandidateFinder) (*recalluc
 		if err != nil {
 			return nil, fmt.Errorf("recall answers ollama: %w", err)
 		}
+		// The same struct satisfies both the sync and streaming
+		// generator interfaces — wire both fields so /v1/recall and
+		// /v1/recall/stream share one upstream connection class.
 		return &recalluc.Recall{
-			Anchors:    anchors,
-			Candidates: finder,
-			Answers:    answers,
+			Anchors:       anchors,
+			Candidates:    finder,
+			Answers:       answers,
+			AnswersStream: answers,
 		}, nil
 	case config.LLMProviderOpenAI:
 		// OpenAI-backed recall is on the roadmap but not wired yet —

@@ -190,6 +190,90 @@ func TestRecallAnswersOllama_HappyPath(t *testing.T) {
 	}
 }
 
+func TestRecallAnchorsOllama_PicksLangPrompt(t *testing.T) {
+	// We assert the system message text is the language-specific prompt,
+	// not the bilingual fallback — qwen2.5:7b would silently pick a
+	// language for us if we left the prompt vague.
+	tests := []struct {
+		name      string
+		lang      string
+		wantSnip  string
+	}{
+		{name: "ru explicit", lang: "ru", wantSnip: "якоря"},
+		{name: "ru default empty", lang: "", wantSnip: "якоря"},
+		{name: "en short", lang: "en", wantSnip: "anchors"},
+		{name: "en BCP-47", lang: "en-US", wantSnip: "anchors"},
+		{name: "unknown falls back to ru", lang: "fr", wantSnip: "якоря"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, cap := newCapturingServer(t, ollamaChatResponse{
+				Message: struct {
+					Content string `json:"content"`
+				}{Content: `{"place":"","person":"","event":"","topic":"","time":""}`},
+			}, http.StatusOK)
+			a, _ := NewRecallAnchorsOllama("qwen2.5:7b",
+				WithOllamaBaseURL(srv.URL),
+				WithOllamaHTTPClient(srv.Client()),
+			)
+			if _, err := a.ExtractAnchors(context.Background(), "x", tt.lang); err != nil {
+				t.Fatal(err)
+			}
+			var sent ollamaChatRequest
+			if err := json.Unmarshal(cap.body, &sent); err != nil {
+				t.Fatal(err)
+			}
+			if len(sent.Messages) < 1 || !strings.Contains(sent.Messages[0].Content, tt.wantSnip) {
+				t.Fatalf("system prompt missing %q for lang=%q:\n%s", tt.wantSnip, tt.lang, sent.Messages[0].Content)
+			}
+		})
+	}
+}
+
+func TestRecallAnswersOllama_PicksLangPrompt(t *testing.T) {
+	title := "Trip to St. Petersburg"
+	candidates := []domain.Node{{ID: "uuid-1", Type: domain.NodeEvent, Title: &title}}
+
+	tests := []struct {
+		name           string
+		lang           string
+		wantSysSnip    string
+		wantHeaderSnip string
+	}{
+		{name: "ru", lang: "ru", wantSysSnip: "ПО-РУССКИ", wantHeaderSnip: "Запрос пользователя"},
+		{name: "en", lang: "en", wantSysSnip: "IN ENGLISH", wantHeaderSnip: "User query"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, cap := newCapturingServer(t, ollamaChatResponse{
+				Message: struct {
+					Content string `json:"content"`
+				}{Content: `{"answer":"x","spans":[]}`},
+			}, http.StatusOK)
+			g, _ := NewRecallAnswersOllama("qwen2.5:7b",
+				WithOllamaBaseURL(srv.URL),
+				WithOllamaHTTPClient(srv.Client()),
+			)
+			if _, err := g.GenerateAnswer(context.Background(), "remind me", tt.lang, candidates); err != nil {
+				t.Fatal(err)
+			}
+			var sent ollamaChatRequest
+			if err := json.Unmarshal(cap.body, &sent); err != nil {
+				t.Fatal(err)
+			}
+			if len(sent.Messages) != 2 {
+				t.Fatalf("want system+user, got %d", len(sent.Messages))
+			}
+			if !strings.Contains(sent.Messages[0].Content, tt.wantSysSnip) {
+				t.Errorf("system prompt missing %q:\n%s", tt.wantSysSnip, sent.Messages[0].Content)
+			}
+			if !strings.Contains(sent.Messages[1].Content, tt.wantHeaderSnip) {
+				t.Errorf("user header missing %q:\n%s", tt.wantHeaderSnip, sent.Messages[1].Content)
+			}
+		})
+	}
+}
+
 func TestNewRecallAnchorsOllama_RequiresModel(t *testing.T) {
 	if _, err := NewRecallAnchorsOllama(""); err == nil {
 		t.Fatal("expected error on empty model")

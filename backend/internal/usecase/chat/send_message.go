@@ -38,6 +38,19 @@ type LLMReplier interface {
 	Reply(ctx context.Context, history []Turn) (string, error)
 }
 
+// LLMStreamReplier is the streaming variant. The emit callback is
+// called for each chunk of the assistant's text in arrival order.
+// Implementations return the full assembled string at the end so the
+// usecase can persist a single domain.Message — the stream is purely
+// a UX latency mask. The order is fixed: emit deltas, then return.
+//
+// Adapters that cannot stream (offline stubs, providers without a
+// streaming API) are not required to implement this — RunStream falls
+// back to LLMReplier and emits one synthetic delta with the full text.
+type LLMStreamReplier interface {
+	ReplyStream(ctx context.Context, history []Turn, emit func(delta string) error) (string, error)
+}
+
 // MessageExtractor turns a stored user message into graph entities. By
 // contract this is non-fatal: it has no error return so the chat path
 // stays simple — the bridge implementation in the composition root logs
@@ -79,8 +92,11 @@ type SendMessage struct {
 	History       messagesLister
 	Toucher       conversationToucher
 	LLM           LLMReplier
-	Extractor     MessageExtractor
-	Clock         clock
+	// LLMStream is optional: when set, RunStream uses it; otherwise
+	// RunStream falls back to LLM and emits one synthetic delta.
+	LLMStream LLMStreamReplier
+	Extractor MessageExtractor
+	Clock     clock
 }
 
 type SendMessageInput struct {
@@ -157,6 +173,116 @@ func (uc *SendMessage) Run(ctx context.Context, in SendMessageInput) (SendMessag
 		UserMessage:      userMsg,
 		AssistantMessage: assistantMsg,
 	}, nil
+}
+
+// SendMessageStreamEvent is the union type RunStream emits to the
+// transport layer. Field semantics mirror the wire SSE events.
+type SendMessageStreamEvent struct {
+	UserStored *UserStoredEvent
+	Delta      *DeltaEvent
+	Final      *FinalEvent
+}
+
+type UserStoredEvent struct {
+	Message domain.Message
+}
+
+type DeltaEvent struct {
+	Text string
+}
+
+type FinalEvent struct {
+	UserMessage      domain.Message
+	AssistantMessage domain.Message
+}
+
+// RunStream is the streaming variant of Run. The pipeline is the
+// same — persist user turn, run extraction, ask the LLM, persist the
+// assistant turn, touch — but the caller sees:
+//
+//   user_stored — the freshly persisted user message, sent as soon
+//                 as the row is committed so the UI can echo
+//                 immediately. Extraction runs *after* this event
+//                 so the visible echo isn't gated on a slow LLM.
+//   delta       — assistant text fragments. Concatenation up to the
+//                 final event yields the full reply.
+//   final       — both stored messages, with assistant_message.id
+//                 set. The UI replaces the accumulated stream text
+//                 with assistant_message.content (authoritative).
+//   error       — emitted by the transport when RunStream returns
+//                 an error; not part of this enum.
+//
+// Validation re-runs to mirror Run; the transport layer should not
+// have to repeat the same checks.
+func (uc *SendMessage) RunStream(ctx context.Context, in SendMessageInput, emit func(SendMessageStreamEvent) error) error {
+	content := strings.TrimSpace(in.Content)
+	switch {
+	case in.UserID == "":
+		return fmt.Errorf("%w: user_id is required", domain.ErrInvalidArgument)
+	case in.ConversationID == "":
+		return fmt.Errorf("%w: conversation_id is required", domain.ErrInvalidArgument)
+	case content == "":
+		return fmt.Errorf("%w: content is required", domain.ErrInvalidArgument)
+	case len(content) > maxMessageContentBytes:
+		return fmt.Errorf("%w: content exceeds %d bytes", domain.ErrInvalidArgument, maxMessageContentBytes)
+	}
+
+	if _, err := uc.Conversations.GetByID(ctx, in.ConversationID, in.UserID); err != nil {
+		return err
+	}
+
+	prior, err := uc.History.ListByConversation(ctx, in.ConversationID, historyContextLimit)
+	if err != nil {
+		return fmt.Errorf("load history: %w", err)
+	}
+
+	userMsg, err := uc.Messages.Append(ctx, in.ConversationID, domain.RoleUser, content)
+	if err != nil {
+		return fmt.Errorf("append user message: %w", err)
+	}
+	if err := emit(SendMessageStreamEvent{UserStored: &UserStoredEvent{Message: userMsg}}); err != nil {
+		return err
+	}
+
+	if uc.Extractor != nil {
+		uc.Extractor.ExtractFromMessage(ctx, in.UserID, userMsg.ID, userMsg.Content)
+	}
+
+	history := buildLLMHistory(prior, userMsg)
+
+	var reply string
+	if uc.LLMStream != nil {
+		reply, err = uc.LLMStream.ReplyStream(ctx, history, func(delta string) error {
+			if delta == "" {
+				return nil
+			}
+			return emit(SendMessageStreamEvent{Delta: &DeltaEvent{Text: delta}})
+		})
+	} else {
+		reply, err = uc.LLM.Reply(ctx, history)
+		if err == nil && reply != "" {
+			if eerr := emit(SendMessageStreamEvent{Delta: &DeltaEvent{Text: reply}}); eerr != nil {
+				return eerr
+			}
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("llm reply: %w", err)
+	}
+
+	assistantMsg, err := uc.Messages.Append(ctx, in.ConversationID, domain.RoleAssistant, reply)
+	if err != nil {
+		return fmt.Errorf("append assistant message: %w", err)
+	}
+
+	// Touch is best-effort; a failure here does not invalidate the
+	// reply we just persisted.
+	_ = uc.Toucher.Touch(ctx, in.ConversationID, uc.Clock.Now())
+
+	return emit(SendMessageStreamEvent{Final: &FinalEvent{
+		UserMessage:      userMsg,
+		AssistantMessage: assistantMsg,
+	}})
 }
 
 // buildLLMHistory turns stored messages plus the just-appended user

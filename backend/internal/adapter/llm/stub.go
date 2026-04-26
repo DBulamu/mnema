@@ -44,6 +44,22 @@ func (s *Stub) Reply(_ context.Context, history []Turn) (string, error) {
 	return "Записал: " + truncate(last, 200), nil
 }
 
+// ReplyStream emits the stub's reply rune-by-rune so the streaming
+// transport can be exercised end-to-end without a real provider. The
+// pause between runes is intentionally tiny — no sleep — because
+// tests assert on output, not timing, and a slow stub would just
+// pessimise developer feedback. UX latency masking is exercised
+// against the real ollama / OpenAI adapters.
+func (s *Stub) ReplyStream(_ context.Context, history []Turn, emit func(string) error) (string, error) {
+	full, _ := s.Reply(nil, history)
+	for _, r := range full {
+		if err := emit(string(r)); err != nil {
+			return "", err
+		}
+	}
+	return full, nil
+}
+
 // lastUserContent returns the trimmed content of the most recent user
 // turn, or "" if none. The chat usecase already guarantees a user turn
 // is present — this is defensive, not load-bearing.

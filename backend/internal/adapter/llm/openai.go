@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -178,6 +179,122 @@ func (o *OpenAI) Reply(ctx context.Context, history []Turn) (string, error) {
 		return "", errors.New("openai: empty assistant content")
 	}
 	return reply, nil
+}
+
+// ReplyStream is the streaming variant of Reply. We POST the same
+// body with stream=true; OpenAI returns text/event-stream where each
+// chunk is "data: {...}\n\n", terminated by "data: [DONE]\n\n". Each
+// frame's choices[0].delta.content carries an incremental piece of
+// the assistant text. Plain UTF-8, so unlike the recall JSON-mode
+// streamer we do not need to buffer for half-runes — OpenAI never
+// splits a rune across SSE chunks.
+func (o *OpenAI) ReplyStream(ctx context.Context, history []Turn, emit func(string) error) (string, error) {
+	msgs := make([]chatMessage, 0, len(history)+1)
+	if o.system != "" {
+		msgs = append(msgs, chatMessage{Role: string(domain.RoleSystem), Content: o.system})
+	}
+	for _, t := range history {
+		msgs = append(msgs, chatMessage{Role: t.Role, Content: t.Content})
+	}
+
+	body, err := json.Marshal(streamingChatRequest{
+		Model:    o.model,
+		Messages: msgs,
+		Stream:   true,
+	})
+	if err != nil {
+		return "", fmt.Errorf("openai: marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(
+		ctx, http.MethodPost,
+		o.baseURL+openaiChatCompletionsPath,
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		return "", fmt.Errorf("openai: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+o.apiKey)
+
+	resp, err := o.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("openai: do request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode/100 != 2 {
+		raw, _ := io.ReadAll(resp.Body)
+		var parsed chatResponse
+		if jsonErr := json.Unmarshal(raw, &parsed); jsonErr == nil && parsed.Error != nil {
+			return "", fmt.Errorf("openai: %d %s: %s", resp.StatusCode, parsed.Error.Type, parsed.Error.Message)
+		}
+		return "", fmt.Errorf("openai: %d: %s", resp.StatusCode, truncateForError(string(raw), openaiErrorBodyLogLimit))
+	}
+
+	var full strings.Builder
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		payload := bytes.TrimSpace(line[len("data:"):])
+		if len(payload) == 0 {
+			continue
+		}
+		if bytes.Equal(payload, []byte("[DONE]")) {
+			break
+		}
+		var frame streamingChatChunk
+		if err := json.Unmarshal(payload, &frame); err != nil {
+			return "", fmt.Errorf("openai: decode stream frame: %w", err)
+		}
+		if len(frame.Choices) == 0 {
+			continue
+		}
+		piece := frame.Choices[0].Delta.Content
+		if piece == "" {
+			continue
+		}
+		full.WriteString(piece)
+		if err := emit(piece); err != nil {
+			return "", err
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("openai: read stream: %w", err)
+	}
+	out := strings.TrimSpace(full.String())
+	if out == "" {
+		return "", errors.New("openai: empty assistant content")
+	}
+	return out, nil
+}
+
+// streamingChatRequest mirrors chatRequest but adds the stream flag.
+// We keep the two types separate so that the non-streaming path's
+// JSON shape stays minimal — adding a `stream:false` field there
+// would also work, but using separate types makes the request
+// intent obvious in the call sites.
+type streamingChatRequest struct {
+	Model    string        `json:"model"`
+	Messages []chatMessage `json:"messages"`
+	Stream   bool          `json:"stream"`
+}
+
+// streamingChatChunk decodes the slice of the SSE frame that we use.
+// Each frame can carry zero or more choices, and the final frame
+// carries finish_reason — which we ignore here in favour of the
+// "[DONE]" sentinel.
+type streamingChatChunk struct {
+	Choices []struct {
+		Delta struct {
+			Content string `json:"content"`
+		} `json:"delta"`
+	} `json:"choices"`
 }
 
 // truncateForError keeps error logs from blowing up on huge response

@@ -19,10 +19,15 @@ frontend/node_modules/
 frontend/dist/
 frontend/.vite/
 frontend/coverage/
+frontend/tsconfig.tsbuildinfo
+frontend/*.tsbuildinfo
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+
+# Claude Code workspace
+.claude/
 
 # IDE / OS
 .idea/

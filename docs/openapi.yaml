@@ -334,7 +334,7 @@ paths:
         '400':
           $ref: '#/components/responses/BadRequest'
 
-  /auth/magic-link/verify:
+  /auth/magic-link/consume:
     post:
       tags: [auth]
       summary: Проверить токен из письма и получить сессию
@@ -356,16 +356,26 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [access_token, refresh_token, user]
+                required: [access_token, access_expires_at, refresh_token, refresh_expires_at, user]
                 properties:
                   access_token:
                     type: string
                     description: JWT, живёт 15 минут
+                  access_expires_at:
+                    type: string
+                    format: date-time
                   refresh_token:
                     type: string
                     description: opaque, живёт 30 дней
+                  refresh_expires_at:
+                    type: string
+                    format: date-time
                   user:
-                    $ref: '#/components/schemas/User'
+                    type: object
+                    required: [id, email]
+                    properties:
+                      id: { type: string, format: uuid }
+                      email: { type: string, format: email }
         '400':
           $ref: '#/components/responses/BadRequest'
 
